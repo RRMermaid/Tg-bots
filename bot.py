@@ -15,7 +15,7 @@ ADMIN_ID = 579596451
 ASK_NAME, ASK_PHONE, ASK_PEOPLE_COUNT, ASK_READY, WAIT_PAYMENT_PHOTO, HELP_ASK_QUESTION = range(6)
 
 MAIN_MENU = [['Регистрация', 'Помощь', 'Войти в чат']]
-CHAT_LINK = "hhttps://t.me/+55hnSW_7qIJjYjdi"
+CHAT_LINK = "https://t.me/+55hnSW_7qIJjYjdi"
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     keyboard = ReplyKeyboardMarkup(MAIN_MENU, resize_keyboard=True)
