@@ -18,7 +18,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# States ConversationHandler
+# Состояния ConversationHandler
 (
     START,
     ASK_NAME,
@@ -61,7 +61,7 @@ def calculate_calorie_range(tdee, goal):
     else:  # Набрать массу
         return tdee, tdee + 300
 
-# Функции для диалога с пользователем
+# Обработчики состояний диалога
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.message.from_user
     logger.info(f"Пользователь {user.id} ({user.full_name}) начал диалог")
@@ -145,6 +145,7 @@ async def show_calorie_corridor(update: Update, context: ContextTypes.DEFAULT_TY
     goal = update.message.text
     users_data[user.id]["goal"] = goal
     data = users_data[user.id]
+
     bmr = calculate_bmr(data["weight"], data["height"], data["age"], data["gender"])
     tdee = calculate_tdee(bmr, data["activity"])
     lower, upper = calculate_calorie_range(tdee, goal)
@@ -165,40 +166,11 @@ async def show_calorie_corridor(update: Update, context: ContextTypes.DEFAULT_TY
     )
     return RECORD_MEAL
 
-# Функция для анализа статистики веса
-def analyze_weight_trends(user_id):
-    weights = users_data[user_id].get("weights", [])
-    if len(weights) < 2:
-        return "Недостаточно данных для анализа"
-    
-    weight_changes = [weights[i]['weight'] - weights[i-1]['weight'] for i in range(1, len(weights))]
-    avg_change = sum(weight_changes) / len(weight_changes)
-
-    if avg_change > 0:
-        return "Ваш вес увеличивается, возможно, стоит пересмотреть рацион или увеличить физическую активность."
-    elif avg_change < 0:
-        return "Вы теряете вес, продолжайте в том же духе!"
-    else:
-        return "Ваш вес стабилен. Рассмотрите изменения в диете или тренировках для улучшения результатов."
-
-# Функция для генерирования рекомендаций по рациону
-def generate_nutrition_recommendations(user_id):
-    meals = users_data[user_id].get("meals", [])
-    total_calories = sum(meal['calories'] for meal in meals)
-    
-    if total_calories < 1800:
-        return "Ваша калорийность низка, добавьте больше белков и углеводов для лучшего результата."
-    elif total_calories > 2500:
-        return "Ваша калорийность слишком высока. Попробуйте уменьшить потребление углеводов и жиров."
-    else:
-        return "Ваши калории в норме. Отличная работа!"
-
-# Функция для добавления приема пищи
 async def record_meal(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.message.from_user
     text = update.message.text
     data = users_data[user.id]
-    
+
     import re
     match = re.search(r'(\d+)', text)
     if not match:
@@ -210,36 +182,88 @@ async def record_meal(update: Update, context: ContextTypes.DEFAULT_TYPE):
     data["meals"].append({"time": now, "calories": cals})
 
     await update.message.reply_text(f"Записано: {cals} ккал.\nЯ напомню тебе о следующем приеме пищи через 2 часа.")
-    context.job_queue.run_once(reminder_2h, 2 * 60 * 60, data=user.id)
-    context.job_queue.run_once(reminder_3h, 3 * 60 * 60, data=user.id)
-    context.job_queue.run_once(reminder_4h, 4 * 60 * 60, data=user.id)
+
+    # Запускаем напоминания через 2, 3 и 4 часа
+    context.job_queue.run_once(reminder_2h, 2 * 60 * 60, data=user.id, name=f"reminder_2h_{user.id}")
+    context.job_queue.run_once(reminder_3h, 3 * 60 * 60, data=user.id, name=f"reminder_3h_{user.id}")
+    context.job_queue.run_once(reminder_4h, 4 * 60 * 60, data=user.id, name=f"reminder_4h_{user.id}")
 
     return RECORD_MEAL
 
-# Напоминания для приема пищи
+async def handle_weight(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = update.message.from_user
+    try:
+        weight = float(update.message.text.replace(',', '.'))
+        users_data.setdefault(user.id, {}).setdefault("weights", []).append({"date": datetime.now().date(), "weight": weight})
+        await update.message.reply_text(f"Спасибо, вес {weight} кг записан.")
+        logger.info(f"Пользователь {user.id} ввел вес: {weight}")
+    except ValueError:
+        await update.message.reply_text("Пожалуйста, введи корректное число для веса (например, 70.5).")
+        logger.warning(f"Пользователь {user.id} ввел некорректное значение веса: {update.message.text}")
+
 async def reminder_2h(context: ContextTypes.DEFAULT_TYPE):
     user_id = context.job.data
-    await context.bot.send_message(chat_id=user_id, text="Не забудь покушать!")
+    try:
+        await context.bot.send_message(chat_id=user_id, text="Не забудь покушать!")
+    except Exception as e:
+        logger.error(f"Ошибка отправки напоминания 2ч: {e}")
 
 async def reminder_3h(context: ContextTypes.DEFAULT_TYPE):
     user_id = context.job.data
-    await context.bot.send_message(chat_id=user_id, text="Не забудь покушать, иначе начнется выделяться гормон стресса!")
+    try:
+        await context.bot.send_message(chat_id=user_id, text="Не забудь покушать, иначе начнется выделяться гормон стресса!")
+    except Exception as e:
+        logger.error(f"Ошибка отправки напоминания 3ч: {e}")
 
 async def reminder_4h(context: ContextTypes.DEFAULT_TYPE):
     user_id = context.job.data
     now = datetime.now()
     if now.hour >= 21:
         return
-    await context.bot.send_message(chat_id=user_id, text="Очень важно покушать сейчас!")
+    try:
+        await context.bot.send_message(chat_id=user_id, text="Очень важно покушать сейчас!")
+    except Exception as e:
+        logger.error(f"Ошибка отправки напоминания 4ч: {e}")
 
-# Функция cancel
+# Функция вечернего отчёта (пример)
+async def evening_report(context: ContextTypes.DEFAULT_TYPE):
+    chat_ids = list(users_data.keys())
+    now = datetime.now()
+    date_today = now.date()
+
+    for user_id in chat_ids:
+        data = users_data[user_id]
+        meals = data.get("meals", [])
+        calories_today = sum(m['calories'] for m in meals if m['time'].date() == date_today)
+        meals_count = sum(1 for m in meals if m['time'].date() == date_today)
+
+        if meals_count == 0:
+            continue
+
+        text = (
+            f"Сегодня вы съели {calories_today} ккал, "
+            f"питание было {meals_count} раз.\n"
+            "Старайтесь соблюдать коридор калорийности!\n"
+        )
+        try:
+            await context.bot.send_message(chat_id=user_id, text=text)
+        except Exception as e:
+            logger.error(f"Ошибка отправки вечернего отчета пользователю {user_id}: {e}")
+
+# Утренний запрос веса
+async def morning_weight_request(context: ContextTypes.DEFAULT_TYPE):
+    for user_id in users_data.keys():
+        try:
+            await context.bot.send_message(chat_id=user_id, text="Доброе утро! Пожалуйста, сообщите свой текущий вес.")
+        except Exception as e:
+            logger.error(f"Ошибка при запросе утреннего веса: {e}")
+
 async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.message.from_user
     logger.info(f"Пользователь {user.id} прервал диалог командой /cancel")
     await update.message.reply_text("Диалог завершен. Если хотите начать сначала, нажмите /start", reply_markup=ReplyKeyboardRemove())
     return ConversationHandler.END
 
-# Основной код для запуска бота
 def main():
     application = ApplicationBuilder().token("YOUR_BOT_TOKEN").build()
 
@@ -262,7 +286,7 @@ def main():
     application.add_handler(conv_handler)
     application.add_handler(MessageHandler(filters.Regex(r"^\d+(\.\d+)?$"), handle_weight))
 
-    # Планировщик
+    # Планировщик заданий
     application.job_queue.run_daily(evening_report, time=time(hour=23, minute=0, second=0))
     application.job_queue.run_daily(morning_weight_request, time=time(hour=8, minute=0, second=0))
 
