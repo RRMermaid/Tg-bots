@@ -1,5 +1,10 @@
 import logging
-from datetime import datetime, time
+import os
+import re
+import json
+import asyncio
+from datetime import datetime, time, timedelta
+
 from telegram import Update, ReplyKeyboardMarkup, ReplyKeyboardRemove
 from telegram.ext import (
     ApplicationBuilder,
@@ -9,26 +14,43 @@ from telegram.ext import (
     ConversationHandler,
     ContextTypes,
 )
-import openai
-from dotenv import load_dotenv
-import os
 
-# Загружаем переменные из .env
-load_dotenv()
+# ==== OpenAI ====
+# Поддержка нового клиента (OpenAI v1+) и старого (openai==0.x)
+OPENAI_AVAILABLE = False
+MODEL_ID = os.getenv("OPENAI_MODEL_ID", "gpt-4o-mini")
 
-# Устанавливаем ключ API для OpenAI
-openai.api_key = os.getenv("OPENAI_API_KEY")
+try:
+    from dotenv import load_dotenv
+    load_dotenv()
+except Exception:
+    pass
 
+try:
+    # Попытка нового клиента
+    from openai import OpenAI
+    client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+    OPENAI_AVAILABLE = True
+except Exception:
+    try:
+        # Попытка старого клиента
+        import openai
+        openai.api_key = os.getenv("OPENAI_API_KEY")
+        client = None
+        OPENAI_AVAILABLE = bool(openai.api_key)
+    except Exception:
+        OPENAI_AVAILABLE = False
+        client = None
 
-# Настройка логирования
+# ==== Логирование ====
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(levelname)s - %(name)s - %(message)s',
-    handlers=[logging.FileHandler("bot.log", encoding='utf-8'), logging.StreamHandler()]
+    handlers=[logging.FileHandler("bot.log", encoding='utf-8'), logging.StreamHandler()],
 )
 logger = logging.getLogger(__name__)
 
-# Состояния ConversationHandler
+# ==== Состояния диалога ====
 (
     START,
     ASK_NAME,
@@ -44,12 +66,12 @@ logger = logging.getLogger(__name__)
 
 users_data = {}
 
-# Клавиатуры
+# ==== Клавиатуры ====
 gender_kb = ReplyKeyboardMarkup([["Мужской", "Женский"]], one_time_keyboard=True, resize_keyboard=True)
 activity_kb = ReplyKeyboardMarkup([["1", "2", "3", "4", "5"]], one_time_keyboard=True, resize_keyboard=True)
 goal_kb = ReplyKeyboardMarkup([["Похудеть", "Удержать вес", "Набрать массу"]], one_time_keyboard=True, resize_keyboard=True)
 
-# Функции для расчетов
+# ==== Формулы ====
 def calculate_bmr(weight, height, age, gender):
     if gender == "Мужской":
         bmr = 10 * weight + 6.25 * height - 5 * age + 5
@@ -71,7 +93,7 @@ def calculate_calorie_range(tdee, goal):
     else:  # Набрать массу
         return tdee, tdee + 300
 
-# Обработчики состояний
+# ==== Диалог ====
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.message.from_user
     logger.info(f"Пользователь {user.id} ({user.full_name}) начал диалог")
@@ -171,34 +193,202 @@ async def show_calorie_corridor(update: Update, context: ContextTypes.DEFAULT_TY
 
     await update.message.reply_text(
         f"Ваш коридор калорий на сегодня: {round(lower)} - {round(upper)} ккал.\n"
-        "Теперь вы можете каждый день вносить свои приемы пищи. "
-        "Напишите первую запись о приеме пищи (например: завтрак - 300 ккал)."
+        "Теперь можете вносить приёмы пищи в свободной форме — например: «два варёных яйца и яблоко».\n"
+        "Я сам посчитаю КБЖУ и поставлю подходящее напоминание."
     )
     return RECORD_MEAL
 
+# ==== Оценка КБЖУ из текста ====
+
+# Фолбэк без OpenAI: очень грубые оценки (чтобы не ломалось, если API-ключа нет)
+RUS_NUM = {"пол": 0.5, "полтора": 1.5, "один": 1, "одно": 1, "одна": 1, "два": 2, "две": 2, "три": 3, "четыре": 4, "пять": 5}
+def _word_qty(text: str) -> float:
+    for w, n in RUS_NUM.items():
+        if re.search(rf"\b{w}\b", text):
+            return n
+    m = re.search(r"(\d+(?:[.,]\d+)?)", text)
+    return float(m.group(1).replace(",", ".")) if m else 1.0
+
+def offline_estimate(text: str) -> dict:
+    t = text.lower()
+    # мини-словарь примеров
+    if "яйц" in t:
+        q = _word_qty(t)
+        # 1 яйцо ~ 70 ккал, 6г белка, 5г жира, 0.5г углеводов
+        return {
+            "calories": int(round(70 * q)),
+            "protein_g": round(6 * q, 1),
+            "fat_g": round(5 * q, 1),
+            "carbs_g": round(0.5 * q, 1),
+            "meal_kind": "plate",
+            "next_meal_hours": 4
+        }
+    if "суп" in t:
+        # Порция супа 300 мл ~ 150 ккал
+        return {"calories": 150, "protein_g": 6, "fat_g": 6, "carbs_g": 16, "meal_kind": "soup", "next_meal_hours": 2}
+    if "яблок" in t:
+        q = _word_qty(t)
+        return {"calories": int(round(52 * q * 100/182)), "protein_g": 0.3*q, "fat_g": 0.2*q, "carbs_g": 14*q, "meal_kind": "snack", "next_meal_hours": 3}
+    if "курин" in t or "грудк" in t:
+        # 150 г кур. грудки ~ 165 ккал
+        return {"calories": 165, "protein_g": 31, "fat_g": 3.6, "carbs_g": 0, "meal_kind": "plate", "next_meal_hours": 4}
+    # Если не узнал — вернём None
+    return {}
+
+OPENAI_SYSTEM_PROMPT = (
+    "Ты диетолог. Разбери русский текст с приёмом пищи и оцени КБЖУ. "
+    "Ответ строго в формате JSON без комментариев и лишнего текста, поля:\n"
+    "{"
+    "\"calories\": <целое число>, "
+    "\"protein_g\": <число>, "
+    "\"fat_g\": <число>, "
+    "\"carbs_g\": <число>, "
+    "\"meal_kind\": \"plate|soup|snack|dessert|drink\", "
+    "\"next_meal_hours\": <целое 2 или 3 или 4>, "
+    "\"explanation\": \"коротко, как считал\""
+    "}\n"
+    "Правила: полноценная тарелка (гарнир+белок+овощи) => meal_kind=\"plate\" и next_meal_hours=4; суп => meal_kind=\"soup\" и 2; перекус => 3. "
+    "Если есть десерт отдельно, meal_kind=\"dessert\" и 3. КБЖУ оценивай реалистично по типовым порциям."
+)
+
+async def estimate_meal_nutrition(text: str) -> dict:
+    """Возвращает dict с ключами: calories, protein_g, fat_g, carbs_g, meal_kind, next_meal_hours, explanation"""
+    # 1) OpenAI, если доступен
+    if OPENAI_AVAILABLE:
+        async def _call_new():
+            # Новый клиент
+            resp = await asyncio.to_thread(
+                client.chat.completions.create,
+                model=MODEL_ID,
+                messages=[{"role": "system", "content": OPENAI_SYSTEM_PROMPT},
+                          {"role": "user", "content": text}],
+                temperature=0.2,
+                max_tokens=200,
+            )
+            return resp.choices[0].message.content
+
+        async def _call_old():
+            # Старый клиент
+            resp = await asyncio.to_thread(
+                openai.ChatCompletion.create,
+                model=MODEL_ID,
+                messages=[{"role": "system", "content": OPENAI_SYSTEM_PROMPT},
+                          {"role": "user", "content": text}],
+                temperature=0.2,
+                max_tokens=200,
+            )
+            return resp.choices[0].message["content"]
+
+        try:
+            content = await (_call_new() if client else _call_old())
+            # Достаём JSON даже если модель добавила лишний текст
+            json_match = re.search(r"\{.*\}", content, flags=re.S)
+            if not json_match:
+                raise ValueError("Не найден JSON в ответе модели")
+            data = json.loads(json_match.group(0))
+            # Мини-валидация
+            if "calories" in data and "meal_kind" in data:
+                return data
+        except Exception as e:
+            logger.warning(f"OpenAI недоступен/ошибка парсинга: {e}")
+
+    # 2) Фолбэк без OpenAI
+    est = offline_estimate(text)
+    if est:
+        est.setdefault("explanation", "Оценка по встроенному справочнику.")
+        return est
+    # 3) Совсем не удалось
+    return {}
+
+# ==== Приёмы пищи и напоминания ====
+def _schedule_next_reminder(context: ContextTypes.DEFAULT_TYPE, user_id: int, hours: int):
+    now = datetime.now()
+    target = now + timedelta(hours=hours)
+    # не позже 21:00
+    cutoff = now.replace(hour=21, minute=0, second=0, microsecond=0)
+    if target > cutoff:
+        # если уже поздно — не напоминаем
+        return None
+    # ставим мягкое имя задачи, чтобы не плодить
+    name = f"eat_reminder_{user_id}_{int(target.timestamp())}"
+    context.job_queue.run_once(reminder_generic, when=(target - now).total_seconds(), data=user_id, name=name)
+    return target
+
 async def record_meal(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.message.from_user
-    text = update.message.text
-    data = users_data[user.id]
+    user_id = user.id
+    text = update.message.text.strip()
+    users_data.setdefault(user_id, {}).setdefault("meals", [])
 
-    import re
-    match = re.search(r'(\d+)', text)
-    if not match:
-        await update.message.reply_text("Пожалуйста, укажи количество калорий в сообщении.")
+    # 1) Пытаемся вытащить готовые ккал из текста (если человек сам указал)
+    kcal_match = re.search(r"(\d{2,5})\s*(ккал|kcal)?", text.lower())
+    if kcal_match:
+        calories = int(kcal_match.group(1))
+        info = {
+            "calories": calories,
+            "protein_g": None, "fat_g": None, "carbs_g": None,
+            "meal_kind": "snack", "next_meal_hours": 3,
+            "explanation": "Пользователь указал калории явно."
+        }
+    else:
+        # 2) Просим ИИ/фолбэк оценить КБЖУ
+        info = await estimate_meal_nutrition(text)
+
+    if not info or "calories" not in info:
+        await update.message.reply_text(
+            "Пока не могу понять блюдо. Опиши проще: что именно и сколько (например, «2 варёных яйца и яблоко»)."
+        )
         return RECORD_MEAL
 
-    cals = int(match.group(1))
     now = datetime.now()
-    data["meals"].append({"time": now, "calories": cals})
+    entry = {
+        "time": now,
+        "text": text,
+        "calories": int(info.get("calories", 0)),
+        "protein_g": info.get("protein_g"),
+        "fat_g": info.get("fat_g"),
+        "carbs_g": info.get("carbs_g"),
+        "meal_kind": info.get("meal_kind"),
+        "source": "ai" if not kcal_match else "user",
+    }
+    users_data[user_id]["meals"].append(entry)
 
-    await update.message.reply_text(f"Записано: {cals} ккал.\nЯ напомню тебе о следующем приеме пищи через 2 часа.")
+    # 3) Напоминание в зависимости от meal_kind (или из AI)
+    next_hours = int(info.get("next_meal_hours") or (2 if entry["meal_kind"] == "soup" else 4))
+    target = _schedule_next_reminder(context, user_id, next_hours)
 
-    context.job_queue.run_once(reminder_2h, 2 * 60 * 60, data=user.id, name=f"reminder_2h_{user.id}")
-    context.job_queue.run_once(reminder_3h, 3 * 60 * 60, data=user.id, name=f"reminder_3h_{user.id}")
-    context.job_queue.run_once(reminder_4h, 4 * 60 * 60, data=user.id, name=f"reminder_4h_{user.id}")
+    # 4) Ответ пользователю
+    kbju_str = []
+    if entry["protein_g"] is not None: kbju_str.append(f"Б: {entry['protein_g']}")
+    if entry["fat_g"] is not None:     kbju_str.append(f"Ж: {entry['fat_g']}")
+    if entry["carbs_g"] is not None:   kbju_str.append(f"У: {entry['carbs_g']}")
+    kbju_line = (" (" + ", ".join(kbju_str) + " г)") if kbju_str else ""
 
+    reminder_line = ""
+    if target:
+        reminder_line = f"\nСледующее напоминание — через ~{next_hours} ч (в {target.strftime('%H:%M')})."
+    else:
+        reminder_line = "\nПоздно для напоминания — сегодня больше не беспокою после 21:00."
+
+    explanation = info.get("explanation")
+    explain_line = f"\nПодсчёт: {explanation}" if explanation else ""
+
+    await update.message.reply_text(
+        f"Записано: {entry['calories']} ккал{kbju_line}.{reminder_line}{explain_line}"
+    )
     return RECORD_MEAL
 
+async def reminder_generic(context: ContextTypes.DEFAULT_TYPE):
+    user_id = context.job.data
+    now = datetime.now()
+    if now.hour >= 21:
+        return
+    try:
+        await context.bot.send_message(chat_id=user_id, text="Пора подкрепиться 🍽️")
+    except Exception as e:
+        logger.error(f"Ошибка отправки напоминания: {e}")
+
+# ==== Ввод веса ====
 async def handle_weight(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.message.from_user
     try:
@@ -208,55 +398,35 @@ async def handle_weight(update: Update, context: ContextTypes.DEFAULT_TYPE):
         logger.info(f"Пользователь {user.id} ввел вес: {weight}")
     except ValueError:
         await update.message.reply_text("Пожалуйста, введи корректное число для веса (например, 70.5).")
-        logger.warning(f"Пользователь {user.id} ввел некорректное значение веса: {update.message.text}")
+        logger.warning(f"Некорректный вес от {user.id}: {update.message.text}")
 
-async def reminder_2h(context: ContextTypes.DEFAULT_TYPE):
-    user_id = context.job.data
-    try:
-        await context.bot.send_message(chat_id=user_id, text="Не забудь покушать!")
-    except Exception as e:
-        logger.error(f"Ошибка отправки напоминания 2ч: {e}")
-
-async def reminder_3h(context: ContextTypes.DEFAULT_TYPE):
-    user_id = context.job.data
-    try:
-        await context.bot.send_message(chat_id=user_id, text="Не забудь покушать, иначе начнется выделяться гормон стресса!")
-    except Exception as e:
-        logger.error(f"Ошибка отправки напоминания 3ч: {e}")
-
-async def reminder_4h(context: ContextTypes.DEFAULT_TYPE):
-    user_id = context.job.data
-    now = datetime.now()
-    if now.hour >= 21:
-        return
-    try:
-        await context.bot.send_message(chat_id=user_id, text="Очень важно покушать сейчас!")
-    except Exception as e:
-        logger.error(f"Ошибка отправки напоминания 4ч: {e}")
-
+# ==== Вечерний отчёт и утренний запрос ====
 async def evening_report(context: ContextTypes.DEFAULT_TYPE):
-    chat_ids = list(users_data.keys())
     now = datetime.now()
     date_today = now.date()
-
-    for user_id in chat_ids:
-        data = users_data[user_id]
-        meals = data.get("meals", [])
-        calories_today = sum(m['calories'] for m in meals if m['time'].date() == date_today)
-        meals_count = sum(1 for m in meals if m['time'].date() == date_today)
-
-        if meals_count == 0:
+    for user_id, data in users_data.items():
+        meals = [m for m in data.get("meals", []) if m["time"].date() == date_today]
+        if not meals:
             continue
+        calories_today = sum(m['calories'] for m in meals)
+        meals_count = len(meals)
+        # Сумма КБЖУ
+        prot = sum((m.get("protein_g") or 0) for m in meals)
+        fat = sum((m.get("fat_g") or 0) for m in meals)
+        carb = sum((m.get("carbs_g") or 0) for m in meals)
 
         text = (
-            f"Сегодня вы съели {calories_today} ккал, "
-            f"питание было {meals_count} раз.\n"
-            "Старайтесь соблюдать коридор калорийности!\n"
+            f"Итог дня:\n"
+            f"• Калории: {calories_today} ккал\n"
+            f"• Приёмов пищи: {meals_count}\n"
+            f"• КБЖУ: Б {round(prot,1)} г / Ж {round(fat,1)} г / У {round(carb,1)} г\n"
+            "Совет: старайтесь держать белок в норме и собирать полноценную тарелку (гарнир+белок+овощи). "
+            "После супа — перекус через ~2 часа; после полноценного блюда — выдерживайте до ~4 часов."
         )
         try:
             await context.bot.send_message(chat_id=user_id, text=text)
         except Exception as e:
-            logger.error(f"Ошибка отправки вечернего отчета пользователю {user_id}: {e}")
+            logger.error(f"Ошибка вечернего отчёта {user_id}: {e}")
 
 async def morning_weight_request(context: ContextTypes.DEFAULT_TYPE):
     for user_id in users_data.keys():
@@ -265,14 +435,22 @@ async def morning_weight_request(context: ContextTypes.DEFAULT_TYPE):
         except Exception as e:
             logger.error(f"Ошибка при запросе утреннего веса: {e}")
 
+# ==== Cancel ====
 async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.message.from_user
     logger.info(f"Пользователь {user.id} прервал диалог командой /cancel")
     await update.message.reply_text("Диалог завершен. Если хотите начать сначала, нажмите /start", reply_markup=ReplyKeyboardRemove())
     return ConversationHandler.END
 
+# ==== Error handler (чтобы не сыпались стектрейсы в лог) ====
+async def on_error(update: object, context: ContextTypes.DEFAULT_TYPE):
+    logger.exception("Ошибка во время обработки апдейта", exc_info=context.error)
+
+# ==== main ====
 def main():
-    application = ApplicationBuilder().token("7272229081:AAHo8LBIn-oB9WnJ8YDkRf3R5zV2B-5qly8").build()
+    # ⚠️ Лучше хранить токен в .env: TELEGRAM_BOT_TOKEN=...
+    token = os.getenv("TELEGRAM_BOT_TOKEN", "7272229081:AAHo8LBIn-oB9WnJ8YDkRf3R5zV2B-5qly8")
+    application = ApplicationBuilder().token(token).build()
 
     conv_handler = ConversationHandler(
         entry_points=[CommandHandler("start", start)],
@@ -291,9 +469,11 @@ def main():
     )
 
     application.add_handler(conv_handler)
+    # Ввод веса в любой момент просто числом
     application.add_handler(MessageHandler(filters.Regex(r"^\d+(\.\d+)?$"), handle_weight))
+    application.add_error_handler(on_error)
 
-    # Планировщик задач — вечерний отчет в 23:00 и утренний запрос веса в 8:00
+    # Планировщик задач
     application.job_queue.run_daily(evening_report, time=time(hour=23, minute=0, second=0))
     application.job_queue.run_daily(morning_weight_request, time=time(hour=8, minute=0, second=0))
 
