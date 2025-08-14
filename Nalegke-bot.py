@@ -61,7 +61,7 @@ def calculate_calorie_range(tdee, goal):
     else:  # Набрать массу
         return tdee, tdee + 300
 
-# Обработчики состояний диалога
+# Обработчики состояний
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.message.from_user
     logger.info(f"Пользователь {user.id} ({user.full_name}) начал диалог")
@@ -183,7 +183,6 @@ async def record_meal(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     await update.message.reply_text(f"Записано: {cals} ккал.\nЯ напомню тебе о следующем приеме пищи через 2 часа.")
 
-    # Запускаем напоминания через 2, 3 и 4 часа
     context.job_queue.run_once(reminder_2h, 2 * 60 * 60, data=user.id, name=f"reminder_2h_{user.id}")
     context.job_queue.run_once(reminder_3h, 3 * 60 * 60, data=user.id, name=f"reminder_3h_{user.id}")
     context.job_queue.run_once(reminder_4h, 4 * 60 * 60, data=user.id, name=f"reminder_4h_{user.id}")
@@ -225,7 +224,6 @@ async def reminder_4h(context: ContextTypes.DEFAULT_TYPE):
     except Exception as e:
         logger.error(f"Ошибка отправки напоминания 4ч: {e}")
 
-# Функция вечернего отчёта (пример)
 async def evening_report(context: ContextTypes.DEFAULT_TYPE):
     chat_ids = list(users_data.keys())
     now = datetime.now()
@@ -250,7 +248,6 @@ async def evening_report(context: ContextTypes.DEFAULT_TYPE):
         except Exception as e:
             logger.error(f"Ошибка отправки вечернего отчета пользователю {user_id}: {e}")
 
-# Утренний запрос веса
 async def morning_weight_request(context: ContextTypes.DEFAULT_TYPE):
     for user_id in users_data.keys():
         try:
@@ -265,7 +262,7 @@ async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     return ConversationHandler.END
 
 def main():
-    application = ApplicationBuilder().token("YOUR_BOT_TOKEN").build()
+    application = ApplicationBuilder().token("7272229081:AAHo8LBIn-oB9WnJ8YDkRf3R5zV2B-5qly8").build()
 
     conv_handler = ConversationHandler(
         entry_points=[CommandHandler("start", start)],
@@ -286,7 +283,7 @@ def main():
     application.add_handler(conv_handler)
     application.add_handler(MessageHandler(filters.Regex(r"^\d+(\.\d+)?$"), handle_weight))
 
-    # Планировщик заданий
+    # Планировщик задач — вечерний отчет в 23:00 и утренний запрос веса в 8:00
     application.job_queue.run_daily(evening_report, time=time(hour=23, minute=0, second=0))
     application.job_queue.run_daily(morning_weight_request, time=time(hour=8, minute=0, second=0))
 
