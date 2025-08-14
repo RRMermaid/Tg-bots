@@ -9,6 +9,16 @@ from telegram.ext import (
     ConversationHandler,
     ContextTypes,
 )
+import openai
+from dotenv import load_dotenv
+import os
+
+# Загружаем переменные из .env
+load_dotenv()
+
+# Устанавливаем ключ API для OpenAI
+openai.api_key = os.getenv("OPENAI_API_KEY")
+
 
 # Настройка логирования
 logging.basicConfig(
