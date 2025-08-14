@@ -232,6 +232,13 @@ async def reminder_4h(context: ContextTypes.DEFAULT_TYPE):
         return
     await context.bot.send_message(chat_id=user_id, text="Очень важно покушать сейчас!")
 
+# Функция cancel
+async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = update.message.from_user
+    logger.info(f"Пользователь {user.id} прервал диалог командой /cancel")
+    await update.message.reply_text("Диалог завершен. Если хотите начать сначала, нажмите /start", reply_markup=ReplyKeyboardRemove())
+    return ConversationHandler.END
+
 # Основной код для запуска бота
 def main():
     application = ApplicationBuilder().token("YOUR_BOT_TOKEN").build()
