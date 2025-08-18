@@ -320,23 +320,27 @@ async def record_meal(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = update.message.text.strip()
     users_data.setdefault(user_id, {}).setdefault("meals", [])
 
-    # 1) Пытаемся вытащить готовые ккал из текста (если человек сам указал)
-    kcal_match = re.search(r"(\d{2,5})\s*(ккал|kcal)?", text.lower())
-    if kcal_match:
-        calories = int(kcal_match.group(1))
-        info = {
-            "calories": calories,
-            "protein_g": None, "fat_g": None, "carbs_g": None,
-            "meal_kind": "snack", "next_meal_hours": 3,
-            "explanation": "Пользователь указал калории явно."
-        }
-    else:
-        # 2) Просим ИИ/фолбэк оценить КБЖУ
-        info = await estimate_meal_nutrition(text)
+    # 1) Сначала всегда пытаемся оценить КБЖУ через ИИ/фолбэк
+    info = await estimate_meal_nutrition(text)
 
+    # 2) Если ИИ не смог — принимаем явные калории ТОЛЬКО с единицами "ккал"/"kcal"
+    explicit_kcal = False
+    if not info or "calories" not in info:
+        kcal_match = re.search(r"\b(\d{2,5})\s*(ккал|kcal)\b", text.lower())
+        if kcal_match:
+            info = {
+                "calories": int(kcal_match.group(1)),
+                "protein_g": None, "fat_g": None, "carbs_g": None,
+                "meal_kind": "snack", "next_meal_hours": 3,
+                "explanation": "Пользователь указал калории явно."
+            }
+            explicit_kcal = True
+
+    # 3) Если всё ещё не вышло — просим переформулировать
     if not info or "calories" not in info:
         await update.message.reply_text(
-            "Пока не могу понять блюдо. Опиши проще: что именно и сколько (например, «2 варёных яйца и яблоко»)."
+            "Пока не могу понять блюдо. Напиши проще (например: «2 варёных яйца и яблоко»). "
+            "Либо укажи калории явно — «200 ккал»."
         )
         return RECORD_MEAL
 
@@ -349,26 +353,25 @@ async def record_meal(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "fat_g": info.get("fat_g"),
         "carbs_g": info.get("carbs_g"),
         "meal_kind": info.get("meal_kind"),
-        "source": "ai" if not kcal_match else "user",
+        "source": "user" if explicit_kcal else "ai",
     }
     users_data[user_id]["meals"].append(entry)
 
-    # 3) Напоминание в зависимости от meal_kind (или из AI)
+    # 4) Напоминание по типу приёма
     next_hours = int(info.get("next_meal_hours") or (2 if entry["meal_kind"] == "soup" else 4))
     target = _schedule_next_reminder(context, user_id, next_hours)
 
-    # 4) Ответ пользователю
+    # 5) Ответ пользователю
     kbju_str = []
     if entry["protein_g"] is not None: kbju_str.append(f"Б: {entry['protein_g']}")
     if entry["fat_g"] is not None:     kbju_str.append(f"Ж: {entry['fat_g']}")
     if entry["carbs_g"] is not None:   kbju_str.append(f"У: {entry['carbs_g']}")
     kbju_line = (" (" + ", ".join(kbju_str) + " г)") if kbju_str else ""
 
-    reminder_line = ""
     if target:
         reminder_line = f"\nСледующее напоминание — через ~{next_hours} ч (в {target.strftime('%H:%M')})."
     else:
-        reminder_line = "\nПоздно для напоминания — сегодня больше не беспокою после 21:00."
+        reminder_line = "\nПоздно для напоминания — после 21:00 не беспокою."
 
     explanation = info.get("explanation")
     explain_line = f"\nПодсчёт: {explanation}" if explanation else ""
