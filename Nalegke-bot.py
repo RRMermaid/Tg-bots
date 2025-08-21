@@ -4,7 +4,8 @@ import re
 import json
 import asyncio
 from datetime import datetime, time, timedelta
-import os, requests
+import os
+import requests
 
 EDAMAM_APP_ID = os.getenv("EDAMAM_APP_ID", "<YOUR_EDAMAM_APP_ID>")
 EDAMAM_APP_KEY = os.getenv("EDAMAM_APP_KEY", "<YOUR_EDAMAM_APP_KEY>")
@@ -450,7 +451,7 @@ async def reminder_generic(context: ContextTypes.DEFAULT_TYPE):
     except Exception as e:
         logger.error(f"Ошибка отправки напоминания: {e}")
 
-        async def reminder_2h(context: ContextTypes.DEFAULT_TYPE):
+async def reminder_2h(context: ContextTypes.DEFAULT_TYPE):
     user_id = context.job.data
     try:
         await context.bot.send_message(chat_id=user_id, text="Позаботься о себе, не забудь покушать!")
@@ -472,13 +473,11 @@ async def reminder_4h(context: ContextTypes.DEFAULT_TYPE):
     user_id = context.job.data
     now = datetime.now()
     if now.hour >= 21:
-        # После 21:00 не напоминаем
         return
     try:
         await context.bot.send_message(chat_id=user_id, text="Критично важно покушать примерно сейчас!")
     except Exception as e:
         logger.error(f"Ошибка отправки напоминания 4ч пользователю {user_id}: {e}")
-
 
 # ==== Ввод веса ====
 async def handle_weight(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -502,10 +501,11 @@ async def evening_report(context: ContextTypes.DEFAULT_TYPE):
             continue
         calories_today = sum(m['calories'] for m in meals)
         meals_count = len(meals)
-        # Сумма КБЖУ
-        prot = sum((m.get("protein_g") or 0) for m in meals)
-        fat = sum((m.get("fat_g") or 0) for m in meals)
-        carb = sum((m.get("carbs_g") or 0) for m in meals)
+        # Сумма КБЖУ (поддерживаем оба формата ключей: *_g и без суффикса)
+        prot = sum((m.get("protein_g") if m.get("protein_g") is not None else m.get("protein") or 0) for m in meals)
+        fat  = sum((m.get("fat_g")     if m.get("fat_g")     is not None else m.get("fat")     or 0) for m in meals)
+        carb = sum((m.get("carbs_g")   if m.get("carbs_g")   is not None else m.get("carbs")   or 0) for m in meals)
+
 
         text = (
             f"Итог дня:\n"
