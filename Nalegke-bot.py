@@ -434,10 +434,9 @@ async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def on_error(update: object, context: ContextTypes.DEFAULT_TYPE):
     logger.exception("Ошибка во время обработки апдейта", exc_info=context.error)
 
-
 # ==== Main ====
 def main():
-    token = os.getenv("TELEGRAM_BOT_TOKEN", "YOUR_TELEGRAM_BOT_TOKEN_HERE")
+    token = os.getenv("TELEGRAM_BOT_TOKEN")
     application = ApplicationBuilder().token(token).build()
 
     conv_handler = ConversationHandler(
