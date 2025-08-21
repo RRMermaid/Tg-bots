@@ -4,6 +4,11 @@ import re
 import json
 import asyncio
 from datetime import datetime, time, timedelta
+import os, requests
+
+EDAMAM_APP_ID = os.getenv("EDAMAM_APP_ID", "<YOUR_EDAMAM_APP_ID>")
+EDAMAM_APP_KEY = os.getenv("EDAMAM_APP_KEY", "<YOUR_EDAMAM_APP_KEY>")
+EDAMAM_URL = "https://api.edamam.com/api/nutrition-data"
 
 from telegram import Update, ReplyKeyboardMarkup, ReplyKeyboardRemove
 from telegram.ext import (
@@ -250,6 +255,63 @@ OPENAI_SYSTEM_PROMPT = (
     "Правила: полноценная тарелка (гарнир+белок+овощи) => meal_kind=\"plate\" и next_meal_hours=4; суп => meal_kind=\"soup\" и 2; перекус => 3. "
     "Если есть десерт отдельно, meal_kind=\"dessert\" и 3. КБЖУ оценивай реалистично по типовым порциям."
 )
+def fetch_nutrition(text: str):
+    """
+    Отправляет свободный текст в Edamam и возвращает словарь
+    с калориями и БЖУ. Если не получилось — возвращает None.
+    """
+    try:
+        params = {
+            "app_id": EDAMAM_APP_ID,
+            "app_key": EDAMAM_APP_KEY,
+            "ingr": text,  # можно целиком фразу: "half tomato, 1 egg, 1 slice white toast, 1/4 avocado, 5 olives"
+        }
+        r = requests.get(EDAMAM_URL, params=params, timeout=10)
+        if r.status_code != 200:
+            logger.error(f"Edamam error {r.status_code}: {r.text}")
+            return None
+        data = r.json()
+        # Edamam nutrition-data выдаёт агрегированные значения
+        calories = data.get("calories")
+        totalNutrients = data.get("totalNutrients", {})
+        protein = (totalNutrients.get("PROCNT") or {}).get("quantity")
+        fat = (totalNutrients.get("FAT") or {}).get("quantity")
+        carbs = (totalNutrients.get("CHOCDF") or {}).get("quantity")
+        # Округлим для красоты
+        if calories is not None:
+            calories = int(round(calories))
+        def rnd(x):
+            return None if x is None else round(x, 1)
+        return {
+            "calories": calories,
+            "protein": rnd(protein),
+            "fat": rnd(fat),
+            "carbs": rnd(carbs),
+        }
+    except Exception as e:
+        logger.exception(f"fetch_nutrition failed: {e}")
+        return None
+
+async def nutria(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Оценка КБЖУ без записи приёма пищи: /nutria <состав блюда>"""
+    # Собираем текст из аргументов команды
+    text = " ".join(context.args) if context.args else ""
+    if not text:
+        await update.message.reply_text("Использование: /nutria 1 яйцо, тост, 1/4 авокадо, 5 оливок")
+        return
+
+    await update.message.reply_text("Считаю калории…")
+    nutri = fetch_nutrition(text)
+    if not nutri or nutri.get("calories") is None:
+        await update.message.reply_text("Не удалось оценить блюдо автоматически 😕 Пришли калории числом, и я запишу вручную.")
+        return
+
+    p = nutri.get("protein")
+    f = nutri.get("fat")
+    ch = nutri.get("carbs")
+    macros = f"\nБ: {p if p is not None else '-'} г • Ж: {f if f is not None else '-'} г • У: {ch if ch is not None else '-'} г"
+
+    await update.message.reply_text(f"~{nutri['calories']} ккал за «{text}».{macros}")
 
 async def estimate_meal_nutrition(text: str) -> dict:
     """Возвращает dict с ключами: calories, protein_g, fat_g, carbs_g, meal_kind, next_meal_hours, explanation"""
@@ -318,67 +380,64 @@ async def record_meal(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.message.from_user
     user_id = user.id
     text = update.message.text.strip()
-    users_data.setdefault(user_id, {}).setdefault("meals", [])
+    data = users_data.get(user_id)
 
-    # 1) Сначала всегда пытаемся оценить КБЖУ через ИИ/фолбэк
-    info = await estimate_meal_nutrition(text)
-
-    # 2) Если ИИ не смог — принимаем явные калории ТОЛЬКО с единицами "ккал"/"kcal"
-    explicit_kcal = False
-    if not info or "calories" not in info:
-        kcal_match = re.search(r"\b(\d{2,5})\s*(ккал|kcal)\b", text.lower())
-        if kcal_match:
-            info = {
-                "calories": int(kcal_match.group(1)),
-                "protein_g": None, "fat_g": None, "carbs_g": None,
-                "meal_kind": "snack", "next_meal_hours": 3,
-                "explanation": "Пользователь указал калории явно."
-            }
-            explicit_kcal = True
-
-    # 3) Если всё ещё не вышло — просим переформулировать
-    if not info or "calories" not in info:
-        await update.message.reply_text(
-            "Пока не могу понять блюдо. Напиши проще (например: «2 варёных яйца и яблоко»). "
-            "Либо укажи калории явно — «200 ккал»."
-        )
+    if data is None:
+        await update.message.reply_text("Пожалуйста, начните с команды /start")
         return RECORD_MEAL
 
-    now = datetime.now()
-    entry = {
-        "time": now,
-        "text": text,
-        "calories": int(info.get("calories", 0)),
-        "protein_g": info.get("protein_g"),
-        "fat_g": info.get("fat_g"),
-        "carbs_g": info.get("carbs_g"),
-        "meal_kind": info.get("meal_kind"),
-        "source": "user" if explicit_kcal else "ai",
-    }
-    users_data[user_id]["meals"].append(entry)
+    import re
+    match = re.search(r'(\d+)', text)
 
-    # 4) Напоминание по типу приёма
-    next_hours = int(info.get("next_meal_hours") or (2 if entry["meal_kind"] == "soup" else 4))
-    target = _schedule_next_reminder(context, user_id, next_hours)
-
-    # 5) Ответ пользователю
-    kbju_str = []
-    if entry["protein_g"] is not None: kbju_str.append(f"Б: {entry['protein_g']}")
-    if entry["fat_g"] is not None:     kbju_str.append(f"Ж: {entry['fat_g']}")
-    if entry["carbs_g"] is not None:   kbju_str.append(f"У: {entry['carbs_g']}")
-    kbju_line = (" (" + ", ".join(kbju_str) + " г)") if kbju_str else ""
-
-    if target:
-        reminder_line = f"\nСледующее напоминание — через ~{next_hours} ч (в {target.strftime('%H:%M')})."
+    if match:
+        # старый режим: пользователь сам указал ккал
+        cals = int(match.group(1))
+        now = datetime.now()
+        data["meals"].append({"time": now, "calories": cals, "raw": text})
+        logger.info(f"[manual] Пользователь {user_id}: {cals} ккал в {now.isoformat()} ({text})")
+        await update.message.reply_text(
+            f"Записано: {cals} ккал.\nЯ напомню о следующем приёме пищи через 2 часа."
+        )
     else:
-        reminder_line = "\nПоздно для напоминания — после 21:00 не беспокою."
+        # новый режим: парсим натуральный текст через Edamam
+        await update.message.reply_text("Считаю калории…")
+        nutri = fetch_nutrition(text)
+        if not nutri or nutri.get("calories") is None:
+            await update.message.reply_text("Не удалось оценить блюдо автоматически. Можешь прислать калории числом?")
+            logger.warning(f"Автооценка не удалась: '{text}' от {user_id}")
+            return RECORD_MEAL
 
-    explanation = info.get("explanation")
-    explain_line = f"\nПодсчёт: {explanation}" if explanation else ""
+        cals = nutri["calories"]
+        now = datetime.now()
+        # сохраним ещё и макросы для будущей аналитики
+        data["meals"].append({
+            "time": now,
+            "calories": cals,
+            "protein": nutri.get("protein"),
+            "fat": nutri.get("fat"),
+            "carbs": nutri.get("carbs"),
+            "raw": text,
+            "auto": True,
+        })
+        logger.info(f"[auto] Пользователь {user_id}: {cals} ккал ({nutri}) из '{text}'")
 
-    await update.message.reply_text(
-        f"Записано: {entry['calories']} ккал{kbju_line}.{reminder_line}{explain_line}"
-    )
+        # ответ пользователю
+        p = nutri.get("protein"); f = nutri.get("fat"); ch = nutri.get("carbs")
+        macros = f"\nБ: {p or '-'} г • Ж: {f or '-'} г • У: {ch or '-'} г"
+        await update.message.reply_text(
+            f"Записано: ~{cals} ккал за «{text}».{macros}\n"
+            "Я напомню о следующем приёме пищи через 2 часа."
+        )
+
+    # Планируем напоминания (как у тебя было)
+    try:
+        context.job_queue.run_once(reminder_2h, 2 * 60 * 60, data=user_id, name=f"reminder_2h_{user_id}")
+        context.job_queue.run_once(reminder_3h, 3 * 60 * 60, data=user_id, name=f"reminder_3h_{user_id}")
+        context.job_queue.run_once(reminder_4h, 4 * 60 * 60, data=user_id, name=f"reminder_4h_{user_id}")
+        logger.info(f"Планирование напоминаний для пользователя {user_id}")
+    except Exception as e:
+        logger.error(f"Ошибка при планировании напоминаний для пользователя {user_id}: {e}")
+
     return RECORD_MEAL
 
 async def reminder_generic(context: ContextTypes.DEFAULT_TYPE):
@@ -390,6 +449,36 @@ async def reminder_generic(context: ContextTypes.DEFAULT_TYPE):
         await context.bot.send_message(chat_id=user_id, text="Пора подкрепиться 🍽️")
     except Exception as e:
         logger.error(f"Ошибка отправки напоминания: {e}")
+
+        async def reminder_2h(context: ContextTypes.DEFAULT_TYPE):
+    user_id = context.job.data
+    try:
+        await context.bot.send_message(chat_id=user_id, text="Позаботься о себе, не забудь покушать!")
+    except Exception as e:
+        logger.error(f"Ошибка отправки напоминания 2ч пользователю {user_id}: {e}")
+
+async def reminder_3h(context: ContextTypes.DEFAULT_TYPE):
+    user_id = context.job.data
+    try:
+        await context.bot.send_message(
+            chat_id=user_id,
+            text="Если ты не внёс данные о приёме пищи, пожалуйста, обязательно покушай. "
+                 "Иначе начнёт выделяться гормон стресса, и похудение приостановится."
+        )
+    except Exception as e:
+        logger.error(f"Ошибка отправки напоминания 3ч пользователю {user_id}: {e}")
+
+async def reminder_4h(context: ContextTypes.DEFAULT_TYPE):
+    user_id = context.job.data
+    now = datetime.now()
+    if now.hour >= 21:
+        # После 21:00 не напоминаем
+        return
+    try:
+        await context.bot.send_message(chat_id=user_id, text="Критично важно покушать примерно сейчас!")
+    except Exception as e:
+        logger.error(f"Ошибка отправки напоминания 4ч пользователю {user_id}: {e}")
+
 
 # ==== Ввод веса ====
 async def handle_weight(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -472,8 +561,13 @@ def main():
     )
 
     application.add_handler(conv_handler)
-    # Ввод веса в любой момент просто числом
+
+    # новый обработчик команды /nutria
+    application.add_handler(CommandHandler("nutria", nutria))
+
+    # Обработка веса вне диалога
     application.add_handler(MessageHandler(filters.Regex(r"^\d+(\.\d+)?$"), handle_weight))
+
     application.add_error_handler(on_error)
 
     # Планировщик задач
