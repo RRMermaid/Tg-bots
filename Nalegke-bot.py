@@ -111,13 +111,15 @@ OPENAI_SYSTEM_PROMPT = (
     "суп => meal_kind=\"soup\" и 2; перекус => 3. Если есть десерт отдельно, meal_kind=\"dessert\" и 3."
 )
 
-
 # ==== OpenAI call ====
 async def estimate_meal_nutrition(text: str) -> dict:
+    """Возвращает dict с ключами: calories, protein_g, fat_g, carbs_g, meal_kind, next_meal_hours, explanation"""
+
     if not OPENAI_AVAILABLE:
         return {}
 
     async def _call_new():
+        """Для нового клиента openai>=1.x"""
         resp = await asyncio.to_thread(
             client.chat.completions.create,
             model=MODEL_ID,
@@ -131,6 +133,7 @@ async def estimate_meal_nutrition(text: str) -> dict:
         return resp.choices[0].message.content
 
     async def _call_old():
+        """Для старого клиента openai==0.x"""
         resp = await asyncio.to_thread(
             openai.ChatCompletion.create,
             model=MODEL_ID,
@@ -148,13 +151,15 @@ async def estimate_meal_nutrition(text: str) -> dict:
         json_match = re.search(r"\{.*\}", content, flags=re.S)
         if not json_match:
             raise ValueError("Не найден JSON в ответе модели")
+
         data = json.loads(json_match.group(0))
         if "calories" in data and "meal_kind" in data:
             return data
+
     except Exception as e:
         logger.warning(f"OpenAI недоступен/ошибка парсинга: {e}")
-    return {}
 
+    return {}
 
 # ==== Handlers ====
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -274,59 +279,55 @@ async def show_calorie_corridor(update: Update, context: ContextTypes.DEFAULT_TY
 async def record_meal(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.message.from_user
     user_id = user.id
-    text = update.message.text.strip()
+    text = update.message.text.strip().lower()
     data = users_data.get(user_id)
 
     if data is None:
         await update.message.reply_text("Пожалуйста, начните с команды /start")
         return RECORD_MEAL
 
-    match = re.search(r"(\d+)", text)
+    import re
+    # ручной ввод: только число
+    num_only = re.fullmatch(r'\d+(?:[.,]\d+)?', text)
+    # или число + ккал
+    cal_match = re.search(r'(\d+(?:[.,]\d+)?)\s*(?:к?кал|k?cal)\b', text)
 
-    if match:
-        cals = int(match.group(1))
+    if num_only or cal_match:
+        val = num_only.group(0) if num_only else cal_match.group(1)
+        cals = int(float(val.replace(',', '.')))
         now = datetime.now()
         data["meals"].append({"time": now, "calories": cals, "raw": text})
-        logger.info(f"[manual] Пользователь {user_id}: {cals} ккал в {now.isoformat()} ({text})")
-        await update.message.reply_text(f"Записано: {cals} ккал.\nЯ напомню о следующем приёме пищи через 2 часа.")
+        logger.info(f"[manual] Пользователь {user_id}: {cals} ккал ({text})")
+        await update.message.reply_text(
+            f"Записано: {cals} ккал.\nЯ напомню о следующем приёме пищи через 2 часа."
+        )
     else:
-        await update.message.reply_text("Считаю калории через ChatGPT…")
-        nutri = await estimate_meal_nutrition(text)
+        # автооценка через Edamam
+        await update.message.reply_text("Считаю калории…")
+        nutri = fetch_nutrition(text)
         if not nutri or nutri.get("calories") is None:
-            await update.message.reply_text("Не удалось оценить блюдо через ChatGPT. Можешь прислать калории числом?")
-            logger.warning(f"Оценка ChatGPT не удалась: '{text}' от {user_id}")
+            await update.message.reply_text("Не удалось оценить блюдо автоматически. Пришлите калории числом.")
+            logger.warning(f"Автооценка не удалась: '{text}' от {user_id}")
             return RECORD_MEAL
 
         cals = nutri["calories"]
         now = datetime.now()
-        data["meals"].append(
-            {
-                "time": now,
-                "calories": cals,
-                "protein_g": nutri.get("protein_g"),
-                "fat_g": nutri.get("fat_g"),
-                "carbs_g": nutri.get("carbs_g"),
-                "raw": text,
-                "auto": True,
-            }
-        )
-        logger.info(f"[ChatGPT] Пользователь {user_id}: {cals} ккал, БЖУ ({nutri}) из '{text}'")
-        p = nutri.get("protein_g")
-        f = nutri.get("fat_g")
-        ch = nutri.get("carbs_g")
+        data["meals"].append({
+            "time": now,
+            "calories": cals,
+            "protein": nutri.get("protein"),
+            "fat": nutri.get("fat"),
+            "carbs": nutri.get("carbs"),
+            "raw": text,
+            "auto": True,
+        })
+        logger.info(f"[auto] Пользователь {user_id}: {cals} ккал ({nutri}) из '{text}'")
+
+        p, f, ch = nutri.get("protein"), nutri.get("fat"), nutri.get("carbs")
         macros = f"\nБ: {p or '-'} г • Ж: {f or '-'} г • У: {ch or '-'} г"
-        await update.message.reply_text(f"Записано: ~{cals} ккал за «{text}».{macros}\nЯ напомню о следующем приёме пищи через 2 часа.")
-
-    try:
-        context.job_queue.run_once(reminder_2h, 2 * 60 * 60, data=user_id, name=f"reminder_2h_{user_id}")
-        context.job_queue.run_once(reminder_3h, 3 * 60 * 60, data=user_id, name=f"reminder_3h_{user_id}")
-        context.job_queue.run_once(reminder_4h, 4 * 60 * 60, data=user_id, name=f"reminder_4h_{user_id}")
-        logger.info(f"Планирование напоминаний для пользователя {user_id}")
-    except Exception as e:
-        logger.error(f"Ошибка при планировании напоминаний для пользователя {user_id}: {e}")
-
-    return RECORD_MEAL
-
+        await update.message.reply_text(
+            f"Записано: ~{cals} ккал за «{text}».{macros}\nЯ напомню о следующем приёме пищи через 2 часа."
+        )
 
 # ==== Reminder handlers ====
 async def reminder_generic(context: ContextTypes.DEFAULT_TYPE):
