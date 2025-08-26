@@ -121,14 +121,11 @@ OPENAI_SYSTEM_PROMPT = (
 
 # ==== OpenAI call ====
 async def estimate_meal_nutrition(text: str) -> dict:
-    """Возвращает dict с ключами: calories, protein_g, fat_g, carbs_g, meal_kind, next_meal_hours, explanation"""
-
     if not OPENAI_AVAILABLE:
         return {}
 
-    async def _call_new():
-        """Для нового клиента openai>=1.x"""
-        resp = await asyncio.to_thread(
+    try:
+        content = await asyncio.to_thread(
             client.chat.completions.create,
             model=MODEL_ID,
             messages=[
@@ -138,32 +135,13 @@ async def estimate_meal_nutrition(text: str) -> dict:
             temperature=0.2,
             max_tokens=200,
         )
-        return resp.choices[0].message.content
-
-    async def _call_old():
-        """Для старого клиента openai==0.x"""
-        resp = await asyncio.to_thread(
-            openai.ChatCompletion.create,
-            model=MODEL_ID,
-            messages=[
-                {"role": "system", "content": OPENAI_SYSTEM_PROMPT},
-                {"role": "user", "content": text},
-            ],
-            temperature=0.2,
-            max_tokens=200,
-        )
-        return resp.choices[0].message["content"]
-
-    try:
-        content = await (_call_new() if client else _call_old())
+        content = content.choices[0].message.content
         json_match = re.search(r"\{.*\}", content, flags=re.S)
         if not json_match:
             raise ValueError("Не найден JSON в ответе модели")
-
         data = json.loads(json_match.group(0))
         if "calories" in data and "meal_kind" in data:
             return data
-
     except Exception as e:
         logger.warning(f"OpenAI недоступен/ошибка парсинга: {e}")
 
