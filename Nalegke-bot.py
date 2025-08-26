@@ -22,30 +22,23 @@ try:
 except Exception:
     pass
 
-# ==== OpenAI ====
+# ==== OpenAI (>=1.0.0) ====
 import httpx
+from openai import OpenAI
 
 OPENAI_AVAILABLE = False
 MODEL_ID = os.getenv("OPENAI_MODEL_ID", "gpt-4o-mini")
 
 try:
-    from openai import OpenAI
-
     proxy_url = "http://127.0.0.1:12334"   # Hiddify mixed port
     http_client = httpx.Client(proxies=proxy_url, timeout=60.0)
 
     client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"), http_client=http_client)
     OPENAI_AVAILABLE = True
-
-except Exception:
-    try:
-        import openai
-        openai.api_key = os.getenv("OPENAI_API_KEY")
-        client = None
-        OPENAI_AVAILABLE = bool(openai.api_key)
-    except Exception:
-        OPENAI_AVAILABLE = False
-        client = None
+except Exception as e:
+    client = None
+    OPENAI_AVAILABLE = False
+    logging.error(f"Ошибка инициализации OpenAI: {e}")
 
 # ==== Logging ====
 logging.basicConfig(
@@ -68,15 +61,12 @@ logger = logging.getLogger(__name__)
     RECORD_MEAL,
 ) = range(9)
 
-
 users_data = {}
-
 
 # ==== Keyboards ====
 gender_kb = ReplyKeyboardMarkup([["Мужской", "Женский"]], one_time_keyboard=True, resize_keyboard=True)
 activity_kb = ReplyKeyboardMarkup([["1", "2", "3", "4", "5"]], one_time_keyboard=True, resize_keyboard=True)
 goal_kb = ReplyKeyboardMarkup([["Похудеть", "Удержать вес", "Набрать массу"]], one_time_keyboard=True, resize_keyboard=True)
-
 
 # ==== Formulas ====
 def calculate_bmr(weight, height, age, gender):
@@ -85,11 +75,9 @@ def calculate_bmr(weight, height, age, gender):
     else:
         return 10 * weight + 6.25 * height - 5 * age - 161
 
-
 def calculate_tdee(bmr, activity_level):
     factors = {1: 1.2, 2: 1.375, 3: 1.55, 4: 1.725, 5: 1.9}
     return bmr * factors.get(activity_level, 1.2)
-
 
 def calculate_calorie_range(tdee, goal):
     if goal == "Похудеть":
@@ -100,7 +88,6 @@ def calculate_calorie_range(tdee, goal):
         return tdee - 100, tdee + 100
     else:  # Набрать массу
         return tdee, tdee + 300
-
 
 # ==== System prompt for OpenAI ====
 OPENAI_SYSTEM_PROMPT = (
@@ -121,11 +108,11 @@ OPENAI_SYSTEM_PROMPT = (
 
 # ==== OpenAI call ====
 async def estimate_meal_nutrition(text: str) -> dict:
-    if not OPENAI_AVAILABLE:
+    if not OPENAI_AVAILABLE or client is None:
         return {}
 
     try:
-        content = await asyncio.to_thread(
+        resp = await asyncio.to_thread(
             client.chat.completions.create,
             model=MODEL_ID,
             messages=[
@@ -135,7 +122,7 @@ async def estimate_meal_nutrition(text: str) -> dict:
             temperature=0.2,
             max_tokens=200,
         )
-        content = content.choices[0].message.content
+        content = resp.choices[0].message.content
         json_match = re.search(r"\{.*\}", content, flags=re.S)
         if not json_match:
             raise ValueError("Не найден JSON в ответе модели")
@@ -147,7 +134,7 @@ async def estimate_meal_nutrition(text: str) -> dict:
 
     return {}
 
-# ==== Handlers ====
+# ==== Handlers (анкета) ====
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.message.from_user
     logger.info(f"Пользователь {user.id} ({user.full_name}) начал диалог")
@@ -158,7 +145,6 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
     return ASK_NAME
 
-
 async def ask_gender(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.message.from_user
     users_data[user.id] = {"name": update.message.text}
@@ -168,13 +154,11 @@ async def ask_gender(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
     return ASK_GENDER
 
-
 async def ask_age(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.message.from_user
     users_data[user.id]["gender"] = update.message.text
     await update.message.reply_text("Сколько тебе лет? Пожалуйста, введи число (например, 30).")
     return ASK_AGE
-
 
 async def ask_weight(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.message.from_user
@@ -187,7 +171,6 @@ async def ask_weight(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("Пожалуйста, введи только число для возраста.")
         return ASK_AGE
 
-
 async def ask_height(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.message.from_user
     try:
@@ -198,7 +181,6 @@ async def ask_height(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except ValueError:
         await update.message.reply_text("Пожалуйста, введи число для веса.")
         return ASK_WEIGHT
-
 
 async def ask_activity(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.message.from_user
@@ -216,7 +198,6 @@ async def ask_activity(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("Пожалуйста, введи число для роста.")
         return ASK_HEIGHT
 
-
 async def ask_goal(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.message.from_user
     try:
@@ -231,7 +212,6 @@ async def ask_goal(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except ValueError:
         await update.message.reply_text("Пожалуйста, выбери число от 1 до 5 на клавиатуре.")
         return ASK_ACTIVITY
-
 
 async def show_calorie_corridor(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.message.from_user
@@ -261,6 +241,7 @@ async def show_calorie_corridor(update: Update, context: ContextTypes.DEFAULT_TY
     )
     return RECORD_MEAL
 
+# ==== Обновлённый record_meal ====
 async def record_meal(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.message.from_user
     user_id = user.id
@@ -271,14 +252,12 @@ async def record_meal(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("Пожалуйста, начните с команды /start")
         return RECORD_MEAL
 
-    # ручной ввод калорий: число + разные варианты написания "ккал"
     cal_match = re.search(
         r"(\d+(?:[.,]\d+)?)\s*(?:к+кал+|кал+|калл+|калорий|ккалл+|k+cal+|cal+)\b",
         text
     )
 
     if cal_match:
-        # пользователь ввёл калории вручную
         val = cal_match.group(1)
         cals = int(float(val.replace(",", ".")))
         now = datetime.now()
@@ -288,7 +267,6 @@ async def record_meal(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"Записано: {cals} ккал (ручной ввод).\nЯ напомню о следующем приёме пищи через 2 часа."
         )
     else:
-        # любое другое описание → автооценка через OpenAI
         await update.message.reply_text("Считаю калории…")
         nutri = {}
 
