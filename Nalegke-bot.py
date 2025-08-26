@@ -283,7 +283,6 @@ async def show_calorie_corridor(update: Update, context: ContextTypes.DEFAULT_TY
     )
     return RECORD_MEAL
 
-
 async def record_meal(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.message.from_user
     user_id = user.id
@@ -294,48 +293,60 @@ async def record_meal(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("Пожалуйста, начните с команды /start")
         return RECORD_MEAL
 
-    import re
-    # ручной ввод: только число
-    num_only = re.fullmatch(r'\d+(?:[.,]\d+)?', text)
-    # или число + ккал
-    cal_match = re.search(r'(\d+(?:[.,]\d+)?)\s*(?:к?кал|k?cal)\b', text)
+    # ручной ввод калорий: число + разные варианты написания "ккал"
+    cal_match = re.search(
+        r"(\d+(?:[.,]\d+)?)\s*(?:к+кал+|кал+|калл+|калорий|ккалл+|k+cal+|cal+)\b",
+        text
+    )
 
-    if num_only or cal_match:
-        val = num_only.group(0) if num_only else cal_match.group(1)
-        cals = int(float(val.replace(',', '.')))
+    if cal_match:
+        # пользователь ввёл калории вручную
+        val = cal_match.group(1)
+        cals = int(float(val.replace(",", ".")))
         now = datetime.now()
         data["meals"].append({"time": now, "calories": cals, "raw": text})
         logger.info(f"[manual] Пользователь {user_id}: {cals} ккал ({text})")
         await update.message.reply_text(
-            f"Записано: {cals} ккал.\nЯ напомню о следующем приёме пищи через 2 часа."
+            f"Записано: {cals} ккал (ручной ввод).\nЯ напомню о следующем приёме пищи через 2 часа."
         )
     else:
-        # автооценка через Edamam
+        # любое другое описание → автооценка через OpenAI
         await update.message.reply_text("Считаю калории…")
-        nutri = fetch_nutrition(text)
-        if not nutri or nutri.get("calories") is None:
-            await update.message.reply_text("Не удалось оценить блюдо автоматически. Пришлите калории числом.")
-            logger.warning(f"Автооценка не удалась: '{text}' от {user_id}")
+        nutri = {}
+
+        if OPENAI_AVAILABLE:
+            try:
+                nutri = await estimate_meal_nutrition(text)
+            except Exception as e:
+                logger.warning(f"Ошибка OpenAI для {user_id}: {e}")
+
+        if not nutri or "calories" not in nutri:
+            await update.message.reply_text(
+                "Не удалось оценить блюдо автоматически 😕 Пришлите калории числом (например: 350 ккал)."
+            )
+            logger.warning(f"Автооценка не удалась (OpenAI): '{text}' от {user_id}")
             return RECORD_MEAL
 
-        cals = nutri["calories"]
+        cals = int(nutri["calories"])
         now = datetime.now()
         data["meals"].append({
             "time": now,
             "calories": cals,
-            "protein": nutri.get("protein"),
-            "fat": nutri.get("fat"),
-            "carbs": nutri.get("carbs"),
+            "protein_g": nutri.get("protein_g"),
+            "fat_g": nutri.get("fat_g"),
+            "carbs_g": nutri.get("carbs_g"),
             "raw": text,
             "auto": True,
         })
-        logger.info(f"[auto] Пользователь {user_id}: {cals} ккал ({nutri}) из '{text}'")
 
-        p, f, ch = nutri.get("protein"), nutri.get("fat"), nutri.get("carbs")
+        p, f, ch = nutri.get("protein_g"), nutri.get("fat_g"), nutri.get("carbs_g")
         macros = f"\nБ: {p or '-'} г • Ж: {f or '-'} г • У: {ch or '-'} г"
         await update.message.reply_text(
-            f"Записано: ~{cals} ккал за «{text}».{macros}\nЯ напомню о следующем приёме пищи через 2 часа."
+            f"Записано: ~{cals} ккал за «{text}».{macros}\n"
+            "Я напомню о следующем приёме пищи через 2 часа."
         )
+
+    return RECORD_MEAL
 
 # ==== Reminder handlers ====
 async def reminder_generic(context: ContextTypes.DEFAULT_TYPE):
