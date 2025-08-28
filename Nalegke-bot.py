@@ -3,6 +3,8 @@ import os
 import re
 import json
 import asyncio
+from telegram import InlineKeyboardButton, InlineKeyboardMarkup
+from telegram.ext import CallbackQueryHandler
 from datetime import datetime, time, timedelta
 
 from telegram import Update, ReplyKeyboardMarkup, ReplyKeyboardRemove
@@ -92,22 +94,103 @@ def calculate_calorie_range(tdee, goal):
     else:  # Набрать массу
         return tdee, tdee + 300
 
-# ==== System prompt for OpenAI ====
-OPENAI_SYSTEM_PROMPT = (
-    "Ты диетолог. Разбери русский текст с приёмом пищи и оцени КБЖУ. "
-    "Ответ строго в формате JSON без комментариев и лишнего текста, поля:\n"
-    "{"
-    '"calories": <целое число>, '
-    '"protein_g": <число>, '
-    '"fat_g": <число>, '
-    '"carbs_g": <число>, '
-    '"meal_kind": "plate|soup|snack|dessert|drink", '
-    '"next_meal_hours": <целое 2 или 3 или 4>, '
-    '"explanation": "коротко, как считал"'
-    "}\n"
-    "Правила: полноценная тарелка (гарнир+белок+овощи) => meal_kind=\"plate\" и next_meal_hours=4; "
-    "суп => meal_kind=\"soup\" и 2; перекус => 3. Если есть десерт отдельно, meal_kind=\"dessert\" и 3."
-)
+async def clarify_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+
+    user_id = query.from_user.id
+    data = users_data.get(user_id, {})
+    pending = data.get("pending_meal")
+    if not pending:
+        await query.edit_message_reply_markup(None)
+        await query.message.reply_text("Нет активной оценки. Отправь приём пищи текстом.")
+        return
+
+    action = query.data
+    # базовая оценка
+    base_cals = pending.get("base_calories", 0)
+    adj = pending.setdefault("adjust", {"portion": 1.0, "oil_extra": 0})
+
+    if action == "portion_small":
+        adj["portion"] = 0.85
+    elif action == "portion_normal":
+        adj["portion"] = 1.0
+    elif action == "portion_big":
+        adj["portion"] = 1.15
+    elif action == "oil_none":
+        adj["oil_extra"] = 0
+    elif action == "oil_tsp":
+        adj["oil_extra"] = 45   # ~1 ч.л. масла ~ 45 ккал
+    elif action == "oil_tbsp":
+        adj["oil_extra"] = 120  # ~1 ст.л. масла ~ 120 ккал
+
+    # пересчёт
+    cals = int(round(base_cals * adj["portion"] + adj["oil_extra"]))
+    pending["calories"] = cals
+
+    # промежуточное обновление подписи
+    if action != "finalize":
+        txt = (f"Уточняем… Сейчас выходит ~{cals} ккал.\n"
+               f"Выбери размер порции и масло, затем нажми «Готово ✅».")
+        await query.edit_message_text(txt, reply_markup=_clarify_kb())
+        return
+
+    # финализация: пишем в дневник и убираем кнопки
+    meal_entry = {
+        "time": pending["time"],
+        "calories": cals,
+        "protein": pending.get("protein"),
+        "fat": pending.get("fat"),
+        "carbs": pending.get("carbs"),
+        "raw": pending.get("raw"),
+        "auto": True,
+        "adjust": adj,
+    }
+    users_data.setdefault(user_id, {}).setdefault("meals", []).append(meal_entry)
+    users_data[user_id]["pending_meal"] = None
+
+    await query.edit_message_reply_markup(None)
+    await query.message.reply_text(f"Записано: {cals} ккал ✅")
+
+def _clarify_kb():
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("Порция меньше", callback_data="portion_small"),
+         InlineKeyboardButton("Обычно", callback_data="portion_normal"),
+         InlineKeyboardButton("Порция больше", callback_data="portion_big")],
+        [InlineKeyboardButton("Без масла", callback_data="oil_none"),
+         InlineKeyboardButton("~1 ч.л. масла", callback_data="oil_tsp"),
+         InlineKeyboardButton("~1 ст.л. масла", callback_data="oil_tbsp")],
+        [InlineKeyboardButton("Готово ✅", callback_data="finalize")]
+    ])
+
+OPENAI_SYSTEM_PROMPT = """
+Ты — добрый, заботливый нутрициолог, помогающий людям восстановить режим питания. Пользователь присылает состав/описание приёма пищи, а твоя задача — аккуратно оценить КБЖУ и время до следующего приёма. Думай реалистичными порциями и типовыми продуктами; если описание расплывчатое, выбирай консервативную (более скромную) оценку.
+
+Дополнительные цели:
+• Веди учёт по каждому продукту мысленно — так, чтобы на основе накопленных данных можно было находить продукты, которые статистически ухудшают динамику веса, и те, что помогают.  
+• Помни правила режима: завтрак в течение 2 часов после пробуждения; каждый приём пищи — полноценный (суп ИЛИ «гарнир + белок + овощи»). После супа пауза 2–3 часа; после полноценной тарелки — 3–4 часа.  
+• Будь тёплым и поддерживающим: после расчёта можно добавить короткую дружелюбную заметку (мягкое напоминание про воду/сон/бережность к себе).
+
+СТРОГИЙ ФОРМАТ ОТВЕТА — ТОЛЬКО JSON (без комментариев и лишнего текста), поля:
+{
+  "calories": <целое число>,               // суммарные ккал по приёму
+  "protein_g": <число>,                    // суммарный белок, граммы
+  "fat_g": <число>,                        // суммарный жир, граммы
+  "carbs_g": <число>,                      // суммарные углеводы, граммы
+  "meal_kind": "plate|soup|snack|dessert|drink",
+  "next_meal_hours": 2|3|4,                // рекомендуемый интервал до следующего приёма
+  "explanation": "очень коротко, как считал (основные продукты и порции)",
+  "support": "1–2 предложения мягкой поддержки (например: Я всё записал; не забывай про воду и сон)"
+}
+
+Правила:
+• «Полноценная тарелка» (гарнир+белок+овощи) => meal_kind="plate", next_meal_hours=3 или 4.  
+• Суп => meal_kind="soup", next_meal_hours=2 или 3.  
+• Отдельная сладость/фрукт/перекус => meal_kind="dessert" или "snack", обычно 3 часа.  
+• Напиток без еды => meal_kind="drink" (обычно без изменения интервала, но укажи 2–3 часа, если был калорийный напиток).  
+• Если упомянуто масло/соусы, добавь типичные калории (ч.л. ~45 ккал, ст.л. ~120 ккал).  
+• Все числа — реальные, округляй калории до целых, макросы до десятых.
+"""
 
 # ==== OpenAI call ====
 async def estimate_meal_nutrition(text: str) -> dict:
@@ -244,102 +327,70 @@ async def show_calorie_corridor(update: Update, context: ContextTypes.DEFAULT_TY
     )
     return RECORD_MEAL
 
-# ==== Обновлённый record_meal ====
+# ==== Обновлённый record_meal (с уточнениями) ====
 async def record_meal(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.message.from_user
     user_id = user.id
     text = update.message.text.strip().lower()
-    data = users_data.get(user_id)
+    data = users_data.setdefault(user_id, {})
 
-    if data is None:
+    if "goal" not in data:
         await update.message.reply_text("Пожалуйста, начните с команды /start")
         return RECORD_MEAL
 
+    # Разрешаем считать калории вручную ТОЛЬКО когда есть единицы "ккал/кал/kcal"
     cal_match = re.search(
-        r"(\d+(?:[.,]\d+)?)\s*(?:к+кал+|кал+|калл+|калорий|ккалл+|k+cal+|cal+)\b",
+        r"(\d+(?:[.,]\d+)?)\s*(?:к+кал+|кал+|калл+|калорий|ккалл+|k+cal+|kcals?|cal(?:ories)?)\b",
         text
     )
 
     if cal_match:
+        # Ручной ввод калорий
         val = cal_match.group(1)
         cals = int(float(val.replace(",", ".")))
         now = datetime.now()
-        data["meals"].append({"time": now, "calories": cals, "raw": text})
+        data.setdefault("meals", []).append({"time": now, "calories": cals, "raw": text})
         logger.info(f"[manual] Пользователь {user_id}: {cals} ккал ({text})")
+        await update.message.reply_text(f"Записано: {cals} ккал (ручной ввод).")
+        return RECORD_MEAL
+
+    # Автооценка через OpenAI
+    await update.message.reply_text("Считаю калории…")
+    nutri = {}
+    if OPENAI_AVAILABLE and client is not None:
+        try:
+            nutri = await estimate_meal_nutrition(text)
+        except Exception as e:
+            logger.warning(f"Ошибка OpenAI для {user_id}: {e}")
+
+    if not nutri or "calories" not in nutri:
         await update.message.reply_text(
-            f"Записано: {cals} ккал (ручной ввод).\nЯ напомню о следующем приёме пищи через 2 часа."
+            "Не удалось оценить блюдо автоматически 😕 Пришлите калории числом, например: 350 ккал."
         )
-    else:
-        await update.message.reply_text("Считаю калории…")
-        nutri = {}
+        logger.warning(f"Автооценка не удалась (OpenAI): '{text}' от {user_id}")
+        return RECORD_MEAL
 
-        if OPENAI_AVAILABLE:
-            try:
-                nutri = await estimate_meal_nutrition(text)
-            except Exception as e:
-                logger.warning(f"Ошибка OpenAI для {user_id}: {e}")
+    # Готовим «ожидающую запись» и показываем клавиатуру уточнений
+    base_cals = int(nutri["calories"])
+    pending = {
+        "time": datetime.now(),
+        "raw": text,
+        "base_calories": base_cals,
+        "protein": nutri.get("protein_g"),
+        "fat": nutri.get("fat_g"),
+        "carbs": nutri.get("carbs_g"),
+        "adjust": {"portion": 1.0, "oil_extra": 0}
+    }
+    data["pending_meal"] = pending
 
-        if not nutri or "calories" not in nutri:
-            await update.message.reply_text(
-                "Не удалось оценить блюдо автоматически 😕 Пришлите калории числом (например: 350 ккал)."
-            )
-            logger.warning(f"Автооценка не удалась (OpenAI): '{text}' от {user_id}")
-            return RECORD_MEAL
-
-        cals = int(nutri["calories"])
-        now = datetime.now()
-        data["meals"].append({
-            "time": now,
-            "calories": cals,
-            "protein_g": nutri.get("protein_g"),
-            "fat_g": nutri.get("fat_g"),
-            "carbs_g": nutri.get("carbs_g"),
-            "raw": text,
-            "auto": True,
-        })
-
-        p, f, ch = nutri.get("protein_g"), nutri.get("fat_g"), nutri.get("carbs_g")
-        macros = f"\nБ: {p or '-'} г • Ж: {f or '-'} г • У: {ch or '-'} г"
-        await update.message.reply_text(
-            f"Записано: ~{cals} ккал за «{text}».{macros}\n"
-            "Я напомню о следующем приёме пищи через 2 часа."
-        )
-
+    p, f, ch = nutri.get("protein_g"), nutri.get("fat_g"), nutri.get("carbs_g")
+    macros = f"\nБ: {p or '-'} г • Ж: {f or '-'} г • У: {ch or '-'} г"
+    txt = (
+        f"Предварительно: ~{base_cals} ккал за «{text}».{macros}\n\n"
+        "Уточни размер порции и масло, затем нажми «Готово ✅»."
+    )
+    await update.message.reply_text(txt, reply_markup=_clarify_kb())
     return RECORD_MEAL
-
-# ==== Reminder handlers ====
-async def reminder_generic(context: ContextTypes.DEFAULT_TYPE):
-    user_id = context.job.data
-    now = datetime.now()
-    if now.hour >= 21:
-        return
-    try:
-        await context.bot.send_message(chat_id=user_id, text="Пора подкрепиться 🍽️")
-    except Exception as e:
-        logger.error(f"Ошибка отправки напоминания: {e}")
-
-
-async def reminder_2h(context: ContextTypes.DEFAULT_TYPE):
-    user_id = context.job.data
-    try:
-        await context.bot.send_message(chat_id=user_id, text="Позаботься о себе, не забудь покушать!")
-    except Exception as e:
-        logger.error(f"Ошибка отправки напоминания 2ч пользователю {user_id}: {e}")
-
-
-async def reminder_3h(context: ContextTypes.DEFAULT_TYPE):
-    user_id = context.job.data
-    try:
-        await context.bot.send_message(
-            chat_id=user_id,
-            text=(
-                "Если ты не внёс данные о приёме пищи, пожалуйста, обязательно покушай. "
-                "Иначе начнёт выделяться гормон стресса, и похудение приостановится."
-            ),
-        )
-    except Exception as e:
-        logger.error(f"Ошибка отправки напоминания 3ч пользователю {user_id}: {e}")
-
 
 async def reminder_4h(context: ContextTypes.DEFAULT_TYPE):
     user_id = context.job.data
@@ -416,32 +467,44 @@ async def on_error(update: object, context: ContextTypes.DEFAULT_TYPE):
 # ==== Main ====
 def main():
     token = os.getenv("TELEGRAM_BOT_TOKEN")
+    if not token:
+        raise RuntimeError("TELEGRAM_BOT_TOKEN не задан в .env")
+
     application = ApplicationBuilder().token(token).build()
 
+    # Диалог (анкета + запись приёмов пищи)
     conv_handler = ConversationHandler(
         entry_points=[CommandHandler("start", start)],
         states={
-            ASK_NAME: [MessageHandler(filters.TEXT & ~filters.COMMAND, ask_gender)],
-            ASK_GENDER: [MessageHandler(filters.Regex("^(Мужской|Женский)$"), ask_age)],
-            ASK_AGE: [MessageHandler(filters.TEXT & ~filters.COMMAND, ask_weight)],
-            ASK_WEIGHT: [MessageHandler(filters.TEXT & ~filters.COMMAND, ask_height)],
-            ASK_HEIGHT: [MessageHandler(filters.TEXT & ~filters.COMMAND, ask_activity)],
-            ASK_ACTIVITY: [MessageHandler(filters.Regex("^[1-5]{1}$"), ask_goal)],
-            ASK_GOAL: [MessageHandler(filters.Regex("^(Похудеть|Удержать вес|Набрать массу)$"), show_calorie_corridor)],
+            ASK_NAME:    [MessageHandler(filters.TEXT & ~filters.COMMAND, ask_gender)],
+            ASK_GENDER:  [MessageHandler(filters.Regex("^(Мужской|Женский)$"), ask_age)],
+            ASK_AGE:     [MessageHandler(filters.TEXT & ~filters.COMMAND, ask_weight)],
+            ASK_WEIGHT:  [MessageHandler(filters.TEXT & ~filters.COMMAND, ask_height)],
+            ASK_HEIGHT:  [MessageHandler(filters.TEXT & ~filters.COMMAND, ask_activity)],
+            ASK_ACTIVITY:[MessageHandler(filters.Regex("^[1-5]{1}$"), ask_goal)],
+            ASK_GOAL:    [MessageHandler(filters.Regex("^(Похудеть|Удержать вес|Набрать массу)$"), show_calorie_corridor)],
             RECORD_MEAL: [MessageHandler(filters.TEXT & ~filters.COMMAND, record_meal)],
         },
         fallbacks=[CommandHandler("cancel", cancel)],
         allow_reentry=True,
     )
-
     application.add_handler(conv_handler)
-    application.add_handler(MessageHandler(filters.Regex(r"^\d+(\.\d+)?$"), handle_weight))
+
+    # Обработчик инлайн-кнопок уточнения (порция/масло/готово)
+    application.add_handler(CallbackQueryHandler(clarify_callback))
+
+    # Ввод веса вне диалога (сообщение — только число)
+    application.add_handler(MessageHandler(filters.Regex(r"^\d+(?:[.,]\d+)?$"), handle_weight))
+
+    # Глобальный обработчик ошибок
     application.add_error_handler(on_error)
 
-    application.job_queue.run_daily(evening_report, time=time(hour=23, minute=0, second=0))
-    application.job_queue.run_daily(morning_weight_request, time=time(hour=8, minute=0, second=0))
+    # Планировщик ежедневных задач
+    application.job_queue.run_daily(evening_report, time=time(hour=23, minute=0))
+    application.job_queue.run_daily(morning_weight_request, time=time(hour=8, minute=0))
 
-    application.run_polling()
+    # Запуск бота
+    application.run_polling(allowed_updates=Update.ALL_TYPES)
 
 
 if __name__ == "__main__":
