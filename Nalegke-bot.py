@@ -53,11 +53,10 @@ logger = logging.getLogger(__name__)
 
 # ==== Dialogue states ====
 (
-    START,
-    ASK_CONTACT,        # НОВОЕ
-    ASK_TZ,             # НОВОЕ
-    ASK_MORNING_HOUR,   # НОВОЕ
-    ASK_EVENING_HOUR,   # НОВОЕ
+    ASK_CONTACT,
+    ASK_TZ,
+    ASK_MORNING_HOUR,
+    ASK_EVENING_HOUR,
     ASK_NAME,
     ASK_GENDER,
     ASK_AGE,
@@ -66,7 +65,8 @@ logger = logging.getLogger(__name__)
     ASK_ACTIVITY,
     ASK_GOAL,
     RECORD_MEAL,
-) = range(12)
+    MONITORING,
+) = range(13)
 
 users_data = {}
 
@@ -110,26 +110,29 @@ def now_local(user_id: int):
     return datetime.now(get_user_tz(user_id))
 
 def schedule_user_jobs(app, user_id: int):
-    """Ставит персональные ежедневные задачи по локальному времени пользователя."""
     u = users_data.get(user_id, {})
     tz = u.get("tzinfo") or timezone.utc
     morning_h = int(u.get("morning_hour", 8))
     evening_h = int(u.get("evening_hour", 21))
 
-    # Сначала отменим старые (если уже были)
+    # Сначала отменим старые (если были)
     for job in app.job_queue.get_jobs_by_name(f"morning_{user_id}"):
         job.schedule_removal()
     for job in app.job_queue.get_jobs_by_name(f"evening_{user_id}"):
         job.schedule_removal()
 
-    # Постановка новых
+    # Новые (передаём aware time с tzinfo)
     app.job_queue.run_daily(
-        morning_weight_request_user, time=time(hour=morning_h, minute=0),
-        name=f"morning_{user_id}", data=user_id, tzinfo=tz
+        morning_weight_request_user,
+        time=time(hour=morning_h, minute=0, tzinfo=tz),
+        name=f"morning_{user_id}",
+        data=user_id,
     )
     app.job_queue.run_daily(
-        evening_report_user, time=time(hour=evening_h, minute=0),
-        name=f"evening_{user_id}", data=user_id, tzinfo=tz
+        evening_report_user,
+        time=time(hour=evening_h, minute=0, tzinfo=tz),
+        name=f"evening_{user_id}",
+        data=user_id,
     )
 
 # Быстрый выбор удобного часа
@@ -462,9 +465,22 @@ async def show_calorie_corridor(update: Update, context: ContextTypes.DEFAULT_TY
     await update.message.reply_text(
         f"Ваш коридор калорий на сегодня: {round(lower)} - {round(upper)} ккал.\n"
         "Теперь можете вносить приёмы пищи в свободной форме — например: «два варёных яйца и яблоко».\n"
-        "Я сам посчитаю КБЖУ через ChatGPT и поставлю подходящее напоминание."
+        "Я сам посчитаю КБЖУ через ChatGPT, предложу уточнение порции и поставлю напоминания."
     )
-    return RECORD_MEAL
+    # Сразу переходим в режим мониторинга
+    return MONITORING
+
+async def monitoring(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Режим мониторинга: здесь бот просто ждёт входящих сообщений с едой/калориями."""
+    user = update.message.from_user
+    users_data.setdefault(user.id, {})
+    # Подсказка пользователю, если он прислал что-то непонятное
+    await update.message.reply_text(
+        "Я в режиме мониторинга — присылай приёмы пищи в свободной форме (например: «2 яйца, 200 г гречки, салат»)\n"
+        "или калории числом с единицами (например: «350 ккал»). "
+        "Чтобы выйти — /cancel."
+    )
+    return MONITORING
 
 # ==== Обновлённый record_meal (с уточнениями) ====
 async def record_meal(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -512,7 +528,7 @@ async def record_meal(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # Готовим «ожидающую запись» и показываем клавиатуру уточнений
     base_cals = int(nutri["calories"])
     pending = {
-        "time": datetime.now(),
+        "time": now_local(user_id),
         "raw": text,
         "base_calories": base_cals,
         "protein": nutri.get("protein_g"),
@@ -644,25 +660,39 @@ def main():
     application = ApplicationBuilder().token(token).build()
 
     conv_handler = ConversationHandler(
-        entry_points=[CommandHandler("start", start)],
-        states={
-            ASK_CONTACT:       [MessageHandler(filters.CONTACT | filters.Regex("^Пропустить$"), handle_contact_or_skip)],
-            ASK_TZ:            [MessageHandler(filters.TEXT & ~filters.COMMAND, handle_timezone)],
-            ASK_MORNING_HOUR:  [MessageHandler(filters.Regex(r"^\d{2}:00$"), handle_morning_hour)],
-            ASK_EVENING_HOUR:  [MessageHandler(filters.Regex(r"^\d{2}:00$"), handle_evening_hour)],
+    entry_points=[CommandHandler("start", start)],
+    states={
+        # контакт или "Пропустить"
+        ASK_CONTACT: [
+            MessageHandler(
+                filters.CONTACT | filters.Regex("(?i)^пропустить$"),
+                handle_contact_or_skip
+            )
+        ],
+        # часовой пояс
+        ASK_TZ: [MessageHandler(filters.TEXT & ~filters.COMMAND, handle_timezone)],
+        # утренний час
+        ASK_MORNING_HOUR: [MessageHandler(filters.Regex(r"^\d{2}:00$"), handle_morning_hour)],
+        # вечерний час
+        ASK_EVENING_HOUR: [MessageHandler(filters.Regex(r"^\d{2}:00$"), handle_evening_hour)],
 
-            ASK_NAME:     [MessageHandler(filters.TEXT & ~filters.COMMAND, ask_gender)],
-            ASK_GENDER:   [MessageHandler(filters.Regex("^(Мужской|Женский)$"), ask_age)],
-            ASK_AGE:      [MessageHandler(filters.TEXT & ~filters.COMMAND, ask_weight)],
-            ASK_WEIGHT:   [MessageHandler(filters.TEXT & ~filters.COMMAND, ask_height)],
-            ASK_HEIGHT:   [MessageHandler(filters.TEXT & ~filters.COMMAND, ask_activity)],
-            ASK_ACTIVITY: [MessageHandler(filters.Regex("^[1-5]{1}$"), ask_goal)],
-            ASK_GOAL:     [MessageHandler(filters.Regex("^(Похудеть|Удержать вес|Набрать массу)$"), show_calorie_corridor)],
-            RECORD_MEAL:  [MessageHandler(filters.TEXT & ~filters.COMMAND, record_meal)],
-        },
-        fallbacks=[CommandHandler("cancel", cancel)],
-        allow_reentry=True,
-    )
+        # анкета
+        ASK_NAME:    [MessageHandler(filters.TEXT & ~filters.COMMAND, ask_gender)],
+        ASK_GENDER:  [MessageHandler(filters.Regex("^(Мужской|Женский)$"), ask_age)],
+        ASK_AGE:     [MessageHandler(filters.TEXT & ~filters.COMMAND, ask_weight)],
+        ASK_WEIGHT:  [MessageHandler(filters.TEXT & ~filters.COMMAND, ask_height)],
+        ASK_HEIGHT:  [MessageHandler(filters.TEXT & ~filters.COMMAND, ask_activity)],
+        ASK_ACTIVITY:[MessageHandler(filters.Regex("^[1-5]{1}$"), ask_goal)],
+        ASK_GOAL:    [MessageHandler(filters.Regex("^(Похудеть|Удержать вес|Набрать массу)$"), show_calorie_corridor)],
+
+        # внесение еды
+        RECORD_MEAL: [MessageHandler(filters.TEXT & ~filters.COMMAND, record_meal)],
+        MONITORING:  [MessageHandler(filters.TEXT & ~filters.COMMAND, record_meal)],
+    },
+    fallbacks=[CommandHandler("cancel", cancel)],
+    allow_reentry=True,
+)
+    
     application.add_handler(conv_handler)
 
     # Инлайн-кнопки уточнений
