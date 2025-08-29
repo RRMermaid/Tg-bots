@@ -3,18 +3,16 @@ import os
 import re
 import json
 import asyncio
-from telegram import InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.ext import CallbackQueryHandler
-from datetime import datetime, time, timedelta
+from datetime import datetime, time, timedelta, timezone
+from zoneinfo import ZoneInfo
 
-from telegram import Update, ReplyKeyboardMarkup, ReplyKeyboardRemove
+from telegram import (
+    Update, ReplyKeyboardMarkup, ReplyKeyboardRemove,
+    InlineKeyboardButton, InlineKeyboardMarkup, KeyboardButton, Contact
+)
 from telegram.ext import (
-    ApplicationBuilder,
-    CommandHandler,
-    MessageHandler,
-    filters,
-    ConversationHandler,
-    ContextTypes,
+    ApplicationBuilder, CommandHandler, MessageHandler, filters,
+    ConversationHandler, ContextTypes, CallbackQueryHandler
 )
 
 # ==== .env ====
@@ -56,6 +54,10 @@ logger = logging.getLogger(__name__)
 # ==== Dialogue states ====
 (
     START,
+    ASK_CONTACT,        # НОВОЕ
+    ASK_TZ,             # НОВОЕ
+    ASK_MORNING_HOUR,   # НОВОЕ
+    ASK_EVENING_HOUR,   # НОВОЕ
     ASK_NAME,
     ASK_GENDER,
     ASK_AGE,
@@ -64,7 +66,7 @@ logger = logging.getLogger(__name__)
     ASK_ACTIVITY,
     ASK_GOAL,
     RECORD_MEAL,
-) = range(9)
+) = range(12)
 
 users_data = {}
 
@@ -72,6 +74,75 @@ users_data = {}
 gender_kb = ReplyKeyboardMarkup([["Мужской", "Женский"]], one_time_keyboard=True, resize_keyboard=True)
 activity_kb = ReplyKeyboardMarkup([["1", "2", "3", "4", "5"]], one_time_keyboard=True, resize_keyboard=True)
 goal_kb = ReplyKeyboardMarkup([["Похудеть", "Удержать вес", "Набрать массу"]], one_time_keyboard=True, resize_keyboard=True)
+
+# Кнопка «поделиться контактом» + «Пропустить»
+contact_kb = ReplyKeyboardMarkup(
+    [[KeyboardButton("Поделиться контактом ☎️", request_contact=True)],
+     ["Пропустить"]],
+    resize_keyboard=True, one_time_keyboard=True
+)
+
+def parse_tz(text: str):
+    """Понимает 'Europe/Moscow', 'UTC+3', 'GMT+3', '+3', '-5' -> tzinfo."""
+    t = text.strip()
+    # IANA-таймзона
+    if "/" in t:
+        try:
+            return ZoneInfo(t)
+        except Exception:
+            pass
+    # Смещение
+    m = re.fullmatch(r'(?:UTC|GMT)?\s*([+-]?\d{1,2})', t, re.I)
+    if m:
+        try:
+            off = int(m.group(1))
+            return timezone(timedelta(hours=off))
+        except Exception:
+            pass
+    return None
+
+def get_user_tz(user_id: int):
+    tz = users_data.get(user_id, {}).get("tzinfo")
+    return tz if tz is not None else timezone.utc
+
+def now_local(user_id: int):
+    # Always return the current time in the user's timezone
+    return datetime.now(get_user_tz(user_id))
+
+def schedule_user_jobs(app, user_id: int):
+    """Ставит персональные ежедневные задачи по локальному времени пользователя."""
+    u = users_data.get(user_id, {})
+    tz = u.get("tzinfo") or timezone.utc
+    morning_h = int(u.get("morning_hour", 8))
+    evening_h = int(u.get("evening_hour", 21))
+
+    # Сначала отменим старые (если уже были)
+    for job in app.job_queue.get_jobs_by_name(f"morning_{user_id}"):
+        job.schedule_removal()
+    for job in app.job_queue.get_jobs_by_name(f"evening_{user_id}"):
+        job.schedule_removal()
+
+    # Постановка новых
+    app.job_queue.run_daily(
+        morning_weight_request_user, time=time(hour=morning_h, minute=0),
+        name=f"morning_{user_id}", data=user_id, tzinfo=tz
+    )
+    app.job_queue.run_daily(
+        evening_report_user, time=time(hour=evening_h, minute=0),
+        name=f"evening_{user_id}", data=user_id, tzinfo=tz
+    )
+
+# Быстрый выбор удобного часа
+def hour_kb(start=6, end=23):
+    row = []
+    rows = []
+    for h in range(start, end+1):
+        row.append(f"{h:02d}:00")
+        if len(row) == 4:
+            rows.append(row)
+            row = []
+    if row: rows.append(row)
+    return ReplyKeyboardMarkup(rows, resize_keyboard=True, one_time_keyboard=True)
 
 # ==== Formulas ====
 def calculate_bmr(weight, height, age, gender):
@@ -223,11 +294,79 @@ async def estimate_meal_nutrition(text: str) -> dict:
 # ==== Handlers (анкета) ====
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.message.from_user
+    users_data.setdefault(user.id, {})
     logger.info(f"Пользователь {user.id} ({user.full_name}) начал диалог")
+
+    msg = (
+        "Привет! Я бот по контролю питания и веса.\n\n"
+        "👉 Разреши мне получить твой контакт — так я смогу в любой момент восстановить историю и напоминания, "
+        "если ты сменишь устройство. Можешь пропустить."
+    )
+    await update.message.reply_text(msg, reply_markup=contact_kb)
+    return ASK_CONTACT
+
+async def handle_contact_or_skip(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = update.effective_user
+    d = users_data.setdefault(user.id, {})
+
+    # Пользователь нажал «Пропустить»
+    if update.message and update.message.text and update.message.text.strip().lower() == "пропустить":
+        pass
+    # Контакт
+    elif update.message and isinstance(update.message.contact, Contact):
+        d["phone"] = update.message.contact.phone_number
+
+    # Спрашиваем часовой пояс
+    txt = (
+        "Укажи свой часовой пояс, чтобы я писал в уместное для тебя время.\n"
+        "Например: Europe/Moscow или UTC+3 (можно просто +3).\n\n"
+        "Если не уверен(а) — напиши город и попробуем подобрать позже."
+    )
+    await update.message.reply_text(txt, reply_markup=ReplyKeyboardRemove())
+    return ASK_TZ
+
+async def handle_timezone(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = update.effective_user
+    tz = parse_tz(update.message.text or "")
+    if not tz:
+        await update.message.reply_text("Не получилось распознать. Пример: Europe/Moscow или UTC+3. Попробуй снова:")
+        return ASK_TZ
+
+    users_data.setdefault(user.id, {})["tzinfo"] = tz
     await update.message.reply_text(
-        "Привет! Я бот по контролю питания и веса.\n"
-        "Я помогу тебе отслеживать калории, вести дневник и давать рекомендации.\n"
-        "Для начала, представься, пожалуйста. Как тебя зовут?"
+        "Принято! Во сколько удобно присылать утренний запрос веса? Выбери час:",
+        reply_markup=hour_kb(6, 11)
+    )
+    return ASK_MORNING_HOUR
+
+async def handle_morning_hour(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = update.effective_user
+    m = re.fullmatch(r'(\d{2}):00', (update.message.text or "").strip())
+    if not m:
+        await update.message.reply_text("Выбери из кнопок, пожалуйста (формат HH:00).")
+        return ASK_MORNING_HOUR
+    users_data.setdefault(user.id, {})["morning_hour"] = int(m.group(1))
+    await update.message.reply_text(
+        "А во сколько присылать вечерний итог дня?",
+        reply_markup=hour_kb(19, 23)
+    )
+    return ASK_EVENING_HOUR
+
+async def handle_evening_hour(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = update.effective_user
+    m = re.fullmatch(r'(\d{2}):00', (update.message.text or "").strip())
+    if not m:
+        await update.message.reply_text("Выбери из кнопок, пожалуйста (формат HH:00).")
+        return ASK_EVENING_HOUR
+    users_data.setdefault(user.id, {})["evening_hour"] = int(m.group(1))
+
+    # Ставим персональные ежедневные задачи
+    schedule_user_jobs(context.application, user.id)
+
+    # Переходим к анкете (имя)
+    await update.message.reply_text(
+        "Отлично! Теперь давай познакомимся. Как тебя зовут?",
+        reply_markup=ReplyKeyboardRemove()
     )
     return ASK_NAME
 
@@ -348,7 +487,7 @@ async def record_meal(update: Update, context: ContextTypes.DEFAULT_TYPE):
         # Ручной ввод калорий
         val = cal_match.group(1)
         cals = int(float(val.replace(",", ".")))
-        now = datetime.now()
+        now = now_local(user_id)
         data.setdefault("meals", []).append({"time": now, "calories": cals, "raw": text})
         logger.info(f"[manual] Пользователь {user_id}: {cals} ккал ({text})")
         await update.message.reply_text(f"Записано: {cals} ккал (ручной ввод).")
@@ -394,7 +533,7 @@ async def record_meal(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def reminder_4h(context: ContextTypes.DEFAULT_TYPE):
     user_id = context.job.data
-    now = datetime.now()
+    now = now_local(user_id)
     if now.hour >= 21:
         return
     try:
@@ -402,6 +541,38 @@ async def reminder_4h(context: ContextTypes.DEFAULT_TYPE):
     except Exception as e:
         logger.error(f"Ошибка отправки напоминания 4ч пользователю {user_id}: {e}")
 
+async def morning_weight_request_user(context: ContextTypes.DEFAULT_TYPE):
+    user_id = context.job.data
+    try:
+        await context.bot.send_message(chat_id=user_id, text="Доброе утро! Пожалуйста, сообщи свой текущий вес 🌤️")
+    except Exception as e:
+        logger.error(f"Ошибка утреннего запроса веса для {user_id}: {e}")
+
+async def evening_report_user(context: ContextTypes.DEFAULT_TYPE):
+    user_id = context.job.data
+    data = users_data.get(user_id) or {}
+    if not data:
+        return
+    date_today = now_local(user_id).date()
+    meals = [m for m in data.get("meals", []) if m.get("time") and m["time"].date() == date_today]
+    if not meals:
+        return
+    calories_today = sum(m.get("calories", 0) for m in meals)
+    meals_count = len(meals)
+    prot = sum((m.get("protein_g") or 0) for m in meals)
+    fat  = sum((m.get("fat_g") or 0) for m in meals)
+    carb = sum((m.get("carbs_g") or 0) for m in meals)
+    text = (
+        "Итог дня:\n"
+        f"• Калории: {calories_today} ккал\n"
+        f"• Приёмов пищи: {meals_count}\n"
+        f"• КБЖУ: Б {round(prot,1)} г / Ж {round(fat,1)} г / У {round(carb,1)} г\n"
+        "Напоминание: полноценная тарелка (гарнир+белок+овощи) помогает держать режим. Вода и сон — тоже важны 💧😴"
+    )
+    try:
+        await context.bot.send_message(chat_id=user_id, text=text)
+    except Exception as e:
+        logger.error(f"Ошибка вечернего отчёта для {user_id}: {e}")
 
 # ==== Weight input handler ====
 async def handle_weight(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -472,40 +643,36 @@ def main():
 
     application = ApplicationBuilder().token(token).build()
 
-    # Диалог (анкета + запись приёмов пищи)
     conv_handler = ConversationHandler(
         entry_points=[CommandHandler("start", start)],
         states={
-            ASK_NAME:    [MessageHandler(filters.TEXT & ~filters.COMMAND, ask_gender)],
-            ASK_GENDER:  [MessageHandler(filters.Regex("^(Мужской|Женский)$"), ask_age)],
-            ASK_AGE:     [MessageHandler(filters.TEXT & ~filters.COMMAND, ask_weight)],
-            ASK_WEIGHT:  [MessageHandler(filters.TEXT & ~filters.COMMAND, ask_height)],
-            ASK_HEIGHT:  [MessageHandler(filters.TEXT & ~filters.COMMAND, ask_activity)],
-            ASK_ACTIVITY:[MessageHandler(filters.Regex("^[1-5]{1}$"), ask_goal)],
-            ASK_GOAL:    [MessageHandler(filters.Regex("^(Похудеть|Удержать вес|Набрать массу)$"), show_calorie_corridor)],
-            RECORD_MEAL: [MessageHandler(filters.TEXT & ~filters.COMMAND, record_meal)],
+            ASK_CONTACT:       [MessageHandler(filters.CONTACT | filters.Regex("^Пропустить$"), handle_contact_or_skip)],
+            ASK_TZ:            [MessageHandler(filters.TEXT & ~filters.COMMAND, handle_timezone)],
+            ASK_MORNING_HOUR:  [MessageHandler(filters.Regex(r"^\d{2}:00$"), handle_morning_hour)],
+            ASK_EVENING_HOUR:  [MessageHandler(filters.Regex(r"^\d{2}:00$"), handle_evening_hour)],
+
+            ASK_NAME:     [MessageHandler(filters.TEXT & ~filters.COMMAND, ask_gender)],
+            ASK_GENDER:   [MessageHandler(filters.Regex("^(Мужской|Женский)$"), ask_age)],
+            ASK_AGE:      [MessageHandler(filters.TEXT & ~filters.COMMAND, ask_weight)],
+            ASK_WEIGHT:   [MessageHandler(filters.TEXT & ~filters.COMMAND, ask_height)],
+            ASK_HEIGHT:   [MessageHandler(filters.TEXT & ~filters.COMMAND, ask_activity)],
+            ASK_ACTIVITY: [MessageHandler(filters.Regex("^[1-5]{1}$"), ask_goal)],
+            ASK_GOAL:     [MessageHandler(filters.Regex("^(Похудеть|Удержать вес|Набрать массу)$"), show_calorie_corridor)],
+            RECORD_MEAL:  [MessageHandler(filters.TEXT & ~filters.COMMAND, record_meal)],
         },
         fallbacks=[CommandHandler("cancel", cancel)],
         allow_reentry=True,
     )
     application.add_handler(conv_handler)
 
-    # Обработчик инлайн-кнопок уточнения (порция/масло/готово)
+    # Инлайн-кнопки уточнений
     application.add_handler(CallbackQueryHandler(clarify_callback))
 
-    # Ввод веса вне диалога (сообщение — только число)
+    # Ввод веса вне диалога (голое число)
     application.add_handler(MessageHandler(filters.Regex(r"^\d+(?:[.,]\d+)?$"), handle_weight))
 
-    # Глобальный обработчик ошибок
     application.add_error_handler(on_error)
 
-    # Планировщик ежедневных задач
-    application.job_queue.run_daily(evening_report, time=time(hour=23, minute=0))
-    application.job_queue.run_daily(morning_weight_request, time=time(hour=8, minute=0))
+    # ВАЖНО: не ставим глобальные run_daily — они теперь персональные (ставятся после выбора TZ/часов)
 
-    # Запуск бота
     application.run_polling(allowed_updates=Update.ALL_TYPES)
-
-
-if __name__ == "__main__":
-    main()
