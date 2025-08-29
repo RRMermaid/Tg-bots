@@ -34,6 +34,8 @@ def make_httpx_client(proxy_url: str) -> httpx.Client:
     return httpx.Client(transport=transport, timeout=60.0)
 
 def main():
+    print("Бот запущен и ожидает команды!")
+    
     # 3) Пробуем оба варианта на 12334: сначала SOCKS5, потом HTTP
     candidates = [
         "socks5h://127.0.0.1:12334",  # требует httpx[socks]

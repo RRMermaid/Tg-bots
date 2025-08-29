@@ -1,33 +1,40 @@
+# ==== Standard library ====
+import asyncio
+import json
 import logging
 import os
 import re
-import json
-import asyncio
 from datetime import datetime, time, timedelta, timezone
 from zoneinfo import ZoneInfo
 
-# ==== User-facing strings (for localization/maintenance) ====
-REMINDER_4H_MESSAGE = "Критично важно покушать примерно сейчас!"
-
+# ==== Third-party ====
+import httpx
+from openai import OpenAI
 from telegram import (
     Update, ReplyKeyboardMarkup, ReplyKeyboardRemove,
-    InlineKeyboardButton, InlineKeyboardMarkup, KeyboardButton, Contact
+    InlineKeyboardButton, InlineKeyboardMarkup,
+    KeyboardButton, Contact
 )
 from telegram.ext import (
-    ApplicationBuilder, CommandHandler, MessageHandler, filters,
-    ConversationHandler, ContextTypes, CallbackQueryHandler
+    ApplicationBuilder, CommandHandler, MessageHandler,
+    filters, ConversationHandler, ContextTypes,
+    CallbackQueryHandler
 )
 
-# ==== .env ====
+# ==== Local/project ====
 try:
     from dotenv import load_dotenv
     load_dotenv()
 except Exception:
     pass
 
+# --- Дружелюбная проверка наличия ключей ---
+if not os.getenv("OPENAI_API_KEY"):
+    print("⚠️ OPENAI_API_KEY не найден в .env")
+if not os.getenv("TELEGRAM_BOT_TOKEN"):
+    print("⚠️ TELEGRAM_BOT_TOKEN не найден в .env")
+
 # ==== OpenAI (>=1.0.0) ====
-import httpx
-from openai import OpenAI
 
 OPENAI_AVAILABLE = False
 MODEL_ID = os.getenv("OPENAI_MODEL_ID")
@@ -36,10 +43,10 @@ try:
     proxy_url = "socks5h://127.0.0.1:12334"   # твой локальный прокси
 
     # создаём транспорт с прокси (новый синтаксис httpx)
-    transport = httpx.HTTPTransport(proxy=proxy_url)
-    http_client = httpx.Client(transport=transport, timeout=60.0)
-
+    # создаём клиент с SOCKS5-прокси
+    http_client = httpx.Client(proxies=proxy_url, timeout=60.0)
     client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"), http_client=http_client)
+
     OPENAI_AVAILABLE = True
 except Exception as e:
     client = None
@@ -551,15 +558,18 @@ async def record_meal(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     # Готовим «ожидающую запись» и показываем клавиатуру уточнений
     base_cals = int(nutri["calories"])
+    
     pending = {
-        "time": now_local(user_id),
-        "raw": text,
-        "base_calories": base_cals,
-        "protein": nutri.get("protein_g"),
-        "fat": nutri.get("fat_g"),
-        "carbs": nutri.get("carbs_g"),
-        "adjust": {"portion": 1.0, "oil_extra": 0}
+    "time": now_local(user_id),
+    "raw": text,
+    "base_calories": base_cals,
+    "protein": nutri.get("protein_g"),
+    "fat": nutri.get("fat_g"),
+    "carbs": nutri.get("carbs_g"),
+    "meal_kind": nutri.get("meal_kind"),  # <--- добавить эту строку
+    "adjust": {"portion": 1.0, "oil_extra": 0}
     }
+
     data["pending_meal"] = pending  # <--- обязательно сохраняем!
 
     p, f, ch = nutri.get("protein_g"), nutri.get("fat_g"), nutri.get("carbs_g")
@@ -601,9 +611,10 @@ async def evening_report_user(context: ContextTypes.DEFAULT_TYPE):
         return
     calories_today = sum(m.get("calories", 0) for m in meals)
     meals_count = len(meals)
-    prot = sum((m.get("protein_g") or 0) for m in meals)
-    fat  = sum((m.get("fat_g") or 0) for m in meals)
-    carb = sum((m.get("carbs_g") or 0) for m in meals)
+    prot = sum((m.get("protein") or 0) for m in meals)
+    fat  = sum((m.get("fat") or 0) for m in meals)
+    carb = sum((m.get("carbs") or 0) for m in meals)
+
     text = (
         "Итог дня:\n"
         f"• Калории: {calories_today} ккал\n"
@@ -691,6 +702,8 @@ async def on_error(update: object, context: ContextTypes.DEFAULT_TYPE):
 
 # ==== Main ====
 def main():
+    print("main() запущен")
+
     token = os.getenv("TELEGRAM_BOT_TOKEN")
     if not token:
         raise RuntimeError("TELEGRAM_BOT_TOKEN не задан в .env")
@@ -698,38 +711,38 @@ def main():
     application = ApplicationBuilder().token(token).build()
 
     conv_handler = ConversationHandler(
-    entry_points=[CommandHandler("start", start)],
-    states={
-        # контакт или "Пропустить"
-        ASK_CONTACT: [
-            MessageHandler(
-                filters.CONTACT | filters.Regex("(?i)^пропустить$"),
-                handle_contact_or_skip
-            )
-        ],
-        # часовой пояс
-        ASK_TZ: [MessageHandler(filters.TEXT & ~filters.COMMAND, handle_timezone)],
-        # утренний час
-        ASK_MORNING_HOUR: [MessageHandler(filters.Regex(r"^\d{2}:00$"), handle_morning_hour)],
-        # вечерний час
-        ASK_EVENING_HOUR: [MessageHandler(filters.Regex(r"^\d{2}:00$"), handle_evening_hour)],
+        entry_points=[CommandHandler("start", start)],
+        states={
+            # контакт или "Пропустить"
+            ASK_CONTACT: [
+                MessageHandler(
+                    filters.CONTACT | filters.Regex("(?i)^пропустить$"),
+                    handle_contact_or_skip
+                )
+            ],
+            # часовой пояс
+            ASK_TZ: [MessageHandler(filters.TEXT & ~filters.COMMAND, handle_timezone)],
+            # утренний час
+            ASK_MORNING_HOUR: [MessageHandler(filters.Regex(r"^\d{2}:00$"), handle_morning_hour)],
+            # вечерний час
+            ASK_EVENING_HOUR: [MessageHandler(filters.Regex(r"^\d{2}:00$"), handle_evening_hour)],
 
-        # анкета
-        ASK_NAME:    [MessageHandler(filters.TEXT & ~filters.COMMAND, ask_gender)],
-        ASK_GENDER:  [MessageHandler(filters.Regex("^(Мужской|Женский)$"), ask_age)],
-        ASK_AGE:     [MessageHandler(filters.TEXT & ~filters.COMMAND, ask_weight)],
-        ASK_WEIGHT:  [MessageHandler(filters.TEXT & ~filters.COMMAND, ask_height)],
-        ASK_HEIGHT:  [MessageHandler(filters.TEXT & ~filters.COMMAND, ask_activity)],
-        ASK_ACTIVITY:[MessageHandler(filters.Regex("^[1-5]{1}$"), ask_goal)],
-        ASK_GOAL:    [MessageHandler(filters.Regex("^(Похудеть|Удержать вес|Набрать массу)$"), show_calorie_corridor)],
+            # анкета
+            ASK_NAME:    [MessageHandler(filters.TEXT & ~filters.COMMAND, ask_gender)],
+            ASK_GENDER:  [MessageHandler(filters.Regex("^(Мужской|Женский)$"), ask_age)],
+            ASK_AGE:     [MessageHandler(filters.TEXT & ~filters.COMMAND, ask_weight)],
+            ASK_WEIGHT:  [MessageHandler(filters.TEXT & ~filters.COMMAND, ask_height)],
+            ASK_HEIGHT:  [MessageHandler(filters.TEXT & ~filters.COMMAND, ask_activity)],
+            ASK_ACTIVITY:[MessageHandler(filters.Regex("^[1-5]{1}$"), ask_goal)],
+            ASK_GOAL:    [MessageHandler(filters.Regex("^(Похудеть|Удержать вес|Набрать массу)$"), show_calorie_corridor)],
 
-        # внесение еды
-        RECORD_MEAL: [MessageHandler(filters.TEXT & ~filters.COMMAND, record_meal)],
-        MONITORING:  [MessageHandler(filters.TEXT & ~filters.COMMAND, record_meal)],
-    },
-    fallbacks=[CommandHandler("cancel", cancel)],
-    allow_reentry=True,
-)
+            # внесение еды
+            RECORD_MEAL: [MessageHandler(filters.TEXT & ~filters.COMMAND, record_meal)],
+            MONITORING:  [MessageHandler(filters.TEXT & ~filters.COMMAND, record_meal)],
+        },
+        fallbacks=[CommandHandler("cancel", cancel)],
+        allow_reentry=True,
+    )
     
     application.add_handler(conv_handler)
     application.add_handler(CallbackQueryHandler(clarify_callback))
@@ -742,3 +755,6 @@ def main():
     # ВАЖНО: не ставим глобальные run_daily — они теперь персональные (ставятся после выбора TZ/часов)
 
     application.run_polling(allowed_updates=Update.ALL_TYPES)
+
+if __name__ == "__main__":
+    main()
