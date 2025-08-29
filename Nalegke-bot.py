@@ -6,6 +6,9 @@ import asyncio
 from datetime import datetime, time, timedelta, timezone
 from zoneinfo import ZoneInfo
 
+# ==== User-facing strings (for localization/maintenance) ====
+REMINDER_4H_MESSAGE = "Критично важно покушать примерно сейчас!"
+
 from telegram import (
     Update, ReplyKeyboardMarkup, ReplyKeyboardRemove,
     InlineKeyboardButton, InlineKeyboardMarkup, KeyboardButton, Contact
@@ -27,7 +30,7 @@ import httpx
 from openai import OpenAI
 
 OPENAI_AVAILABLE = False
-MODEL_ID = os.getenv("OPENAI_MODEL_ID", "gpt-4o-mini")
+MODEL_ID = os.getenv("OPENAI_MODEL_ID")
 
 try:
     proxy_url = "socks5h://127.0.0.1:12334"   # твой локальный прокси
@@ -220,12 +223,30 @@ async def clarify_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "auto": True,
         "adjust": adj,
     }
+
     users_data.setdefault(user_id, {}).setdefault("meals", []).append(meal_entry)
     users_data[user_id]["pending_meal"] = None
 
+    # --- Персонализированное напоминание ---
+    meal_kind = pending.get("meal_kind")
+    if meal_kind in ("soup", "eggs", "omelette"):
+        delay = timedelta(hours=2)
+        reminder_text = "Важно покушать через 2 часа после супа или яичницы!"
+    else:
+        delay = timedelta(hours=3)
+        reminder_text = "Через 3 часа после этого приёма пищи важно позаботиться о себе и покушать!"
+
+    async def personalized_reminder(context: ContextTypes.DEFAULT_TYPE):
+        try:
+            await context.bot.send_message(chat_id=user_id, text=reminder_text)
+        except Exception as e:
+            logger.error(f"Ошибка отправки персонального напоминания пользователю {user_id}: {e}")
+
+    context.application.job_queue.run_once(personalized_reminder, when=delay)
+
     await query.edit_message_reply_markup(None)
     await query.message.reply_text(f"Записано: {cals} ккал ✅")
-
+    
 def _clarify_kb():
     return InlineKeyboardMarkup([
         [InlineKeyboardButton("Порция меньше", callback_data="portion_small"),
@@ -483,6 +504,8 @@ async def monitoring(update: Update, context: ContextTypes.DEFAULT_TYPE):
     return MONITORING
 
 # ==== Обновлённый record_meal (с уточнениями) ====
+# ...existing code...
+
 async def record_meal(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.message.from_user
     user_id = user.id
@@ -505,6 +528,7 @@ async def record_meal(update: Update, context: ContextTypes.DEFAULT_TYPE):
         cals = int(float(val.replace(",", ".")))
         now = now_local(user_id)
         data.setdefault("meals", []).append({"time": now, "calories": cals, "raw": text})
+        data["pending_meal"] = None  # <--- вот эта строка
         logger.info(f"[manual] Пользователь {user_id}: {cals} ккал ({text})")
         await update.message.reply_text(f"Записано: {cals} ккал (ручной ввод).")
         return RECORD_MEAL
@@ -536,7 +560,7 @@ async def record_meal(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "carbs": nutri.get("carbs_g"),
         "adjust": {"portion": 1.0, "oil_extra": 0}
     }
-    data["pending_meal"] = pending
+    data["pending_meal"] = pending  # <--- обязательно сохраняем!
 
     p, f, ch = nutri.get("protein_g"), nutri.get("fat_g"), nutri.get("carbs_g")
     macros = f"\nБ: {p or '-'} г • Ж: {f or '-'} г • У: {ch or '-'} г"
@@ -546,6 +570,8 @@ async def record_meal(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
     await update.message.reply_text(txt, reply_markup=_clarify_kb())
     return RECORD_MEAL
+
+# ...existing code...
 
 async def reminder_4h(context: ContextTypes.DEFAULT_TYPE):
     user_id = context.job.data
@@ -637,7 +663,19 @@ async def morning_weight_request(context: ContextTypes.DEFAULT_TYPE):
             await context.bot.send_message(chat_id=user_id, text="Доброе утро! Пожалуйста, сообщите свой текущий вес.")
         except Exception as e:
             logger.error(f"Ошибка при запросе утреннего веса: {e}")
-
+            
+async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    text = (
+        "ℹ️ <b>Помощь по боту</b>\n\n"
+        "• Просто напишите, что вы поели — бот сам оценит калории.\n"
+        "• Можно указать калории вручную: <code>350 ккал</code>\n"
+        "• Для уточнения порции и масла используйте кнопки после автооценки.\n"
+        "• Введите вес числом, чтобы записать взвешивание.\n"
+        "• Команда /report покажет дневной отчёт.\n"
+        "• Команда /start — сбросить настройки и начать заново.\n"
+        "\nЕсли возникли вопросы — напишите автору!"
+    )
+    await update.message.reply_text(text, parse_mode="HTML")
 
 # ==== Cancel handler ====
 async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -694,14 +732,12 @@ def main():
 )
     
     application.add_handler(conv_handler)
-
-    # Инлайн-кнопки уточнений
     application.add_handler(CallbackQueryHandler(clarify_callback))
-
-    # Ввод веса вне диалога (голое число)
     application.add_handler(MessageHandler(filters.Regex(r"^\d+(?:[.,]\d+)?$"), handle_weight))
-
     application.add_error_handler(on_error)
+
+    # Добавьте help-хендлер здесь:
+    application.add_handler(CommandHandler("help", help_command))
 
     # ВАЖНО: не ставим глобальные run_daily — они теперь персональные (ставятся после выбора TZ/часов)
 
