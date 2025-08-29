@@ -35,7 +35,7 @@ else:
     print(f"✅ Используем {working_proxy} для OpenAI")
 
     # Создаём httpx-клиент с прокси
-    http_client = httpx.Client(proxies=working_proxy, timeout=60.0)
+    http_client = httpx.Client(transport=httpx.HTTPTransport(proxy=working_proxy), timeout=60.0)
     client = OpenAI(api_key=api_key, http_client=http_client)
 
     try:
