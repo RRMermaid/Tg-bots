@@ -250,12 +250,6 @@ async def clarify_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
 def _clarify_kb():
     return InlineKeyboardMarkup([
-        [InlineKeyboardButton("Порция меньше", callback_data="portion_small"),
-         InlineKeyboardButton("Обычно", callback_data="portion_normal"),
-         InlineKeyboardButton("Порция больше", callback_data="portion_big")],
-        [InlineKeyboardButton("Без масла", callback_data="oil_none"),
-         InlineKeyboardButton("~1 ч.л. масла", callback_data="oil_tsp"),
-         InlineKeyboardButton("~1 ст.л. масла", callback_data="oil_tbsp")],
         [InlineKeyboardButton("Готово ✅", callback_data="finalize")]
     ])
 
