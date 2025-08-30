@@ -1,3 +1,9 @@
+import psycopg2
+
+def get_connection():
+    DATABASE_URL = os.getenv("DATABASE_URL")  # строка подключения к базе
+    return psycopg2.connect(DATABASE_URL)
+
 # ==== Standard library ====
 import asyncio
 import json
@@ -6,6 +12,7 @@ import os
 import re
 from datetime import datetime, time, timedelta, timezone
 from zoneinfo import ZoneInfo
+from db import create_tables, save_user_data, load_user_data, save_weight, save_meal, analyze_user_day
 
 # ==== Third-party ====
 import httpx
@@ -248,6 +255,19 @@ async def clarify_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await query.edit_message_reply_markup(None)
     await query.message.reply_text(f"Записано: {cals} ккал ✅")
     
+    save_meal(
+        user_id,
+        meal_entry["time"],
+        meal_entry["calories"],
+        meal_entry.get("protein"),
+        meal_entry.get("fat"),
+        meal_entry.get("carbs"),
+        meal_entry.get("raw"),
+        meal_entry.get("meal_kind"),
+        meal_entry["adjust"].get("portion", 1.0),
+        meal_entry["adjust"].get("oil_extra", 0)
+    )
+    
 def _clarify_kb():
     return InlineKeyboardMarkup([
         [InlineKeyboardButton("Готово ✅", callback_data="finalize")]
@@ -312,6 +332,13 @@ async def estimate_meal_nutrition(text: str) -> dict:
 
 # ==== Handlers (анкета) ====
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = update.message.from_user
+    data = load_user_data(user.id)
+    if data:
+        users_data[user.id] = data
+    else:
+        users_data.setdefault(user.id, {})
+        
     user = update.message.from_user
     users_data.setdefault(user.id, {})
     logger.info(f"Пользователь {user.id} ({user.full_name}) начал диалог")
@@ -483,6 +510,7 @@ async def show_calorie_corridor(update: Update, context: ContextTypes.DEFAULT_TY
         "Теперь можете вносить приёмы пищи в свободной форме — например: «два варёных яйца и яблоко».\n"
         "Я сам посчитаю КБЖУ через ChatGPT, предложу уточнение порции и поставлю напоминания."
     )
+    save_user_data(user.id, users_data[user.id])
     # Сразу переходим в режим мониторинга
     return MONITORING
 
@@ -612,6 +640,10 @@ async def evening_report_user(context: ContextTypes.DEFAULT_TYPE):
     )
     try:
         await context.bot.send_message(chat_id=user_id, text=text)
+        # Анализируем и даем советы
+        advice = analyze_user_day(user_id, date_today)
+        if advice:
+            await context.bot.send_message(chat_id=user_id, text=advice)
     except Exception as e:
         logger.error(f"Ошибка вечернего отчёта для {user_id}: {e}")
 
@@ -623,11 +655,13 @@ async def handle_weight(update: Update, context: ContextTypes.DEFAULT_TYPE):
         users_data.setdefault(user.id, {}).setdefault("weights", []).append({"date": datetime.now().date(), "weight": weight})
         await update.message.reply_text(f"Спасибо, вес {weight} кг записан.")
         logger.info(f"Пользователь {user.id} ввел вес: {weight}")
+
+        # Сохраняем в базу
+        save_weight(user.id, datetime.now().date(), weight)
     except ValueError:
         await update.message.reply_text("Пожалуйста, введи корректное число для веса (например, 70.5).")
         logger.warning(f"Некорректный вес от {user.id}: {update.message.text}")
-
-
+        
 # ==== Evening report and morning request ====
 async def evening_report(context: ContextTypes.DEFAULT_TYPE):
     now = datetime.now()
@@ -691,6 +725,8 @@ async def on_error(update: object, context: ContextTypes.DEFAULT_TYPE):
 # ==== Main ====
 def main():
     print("main() запущен")
+    
+    create_tables()
 
     token = os.getenv("TELEGRAM_BOT_TOKEN")
     if not token:
