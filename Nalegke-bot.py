@@ -40,13 +40,7 @@ OPENAI_AVAILABLE = False
 MODEL_ID = os.getenv("OPENAI_MODEL_ID")
 
 try:
-    proxy_url = "socks5h://127.0.0.1:12334"   # твой локальный прокси
-
-    # создаём транспорт с прокси (новый синтаксис httpx)
-    # создаём клиент с SOCKS5-прокси
-    http_client = httpx.Client(proxies=proxy_url, timeout=60.0)
-    client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"), http_client=http_client)
-
+    client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
     OPENAI_AVAILABLE = True
 except Exception as e:
     client = None
