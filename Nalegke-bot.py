@@ -1,3 +1,5 @@
+from dotenv import load_dotenv
+load_dotenv(encoding="utf-8")
 import asyncio
 import json
 import logging
@@ -15,13 +17,6 @@ from telegram.ext import (
     ApplicationBuilder, CommandHandler, MessageHandler,
     filters, ConversationHandler, ContextTypes
 )
-
-# ==== Local/project ====
-try:
-    from dotenv import load_dotenv
-    load_dotenv()
-except Exception:
-    pass
 
 from db import (
     create_tables, save_user_data, load_user_data,
