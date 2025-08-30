@@ -1,10 +1,3 @@
-import psycopg2
-
-def get_connection():
-    DATABASE_URL = os.getenv("DATABASE_URL")  # строка подключения к базе
-    return psycopg2.connect(DATABASE_URL)
-
-# ==== Standard library ====
 import asyncio
 import json
 import logging
@@ -12,20 +5,15 @@ import os
 import re
 from datetime import datetime, time, timedelta, timezone
 from zoneinfo import ZoneInfo
-from db import create_tables, save_user_data, load_user_data, save_weight, save_meal, analyze_user_day
 
-# ==== Third-party ====
-import httpx
 from openai import OpenAI
 from telegram import (
     Update, ReplyKeyboardMarkup, ReplyKeyboardRemove,
-    InlineKeyboardButton, InlineKeyboardMarkup,
     KeyboardButton, Contact
 )
 from telegram.ext import (
     ApplicationBuilder, CommandHandler, MessageHandler,
-    filters, ConversationHandler, ContextTypes,
-    CallbackQueryHandler
+    filters, ConversationHandler, ContextTypes
 )
 
 # ==== Local/project ====
@@ -35,6 +23,11 @@ try:
 except Exception:
     pass
 
+from db import (
+    create_tables, save_user_data, load_user_data,
+    save_weight, save_meal, analyze_user_day
+)
+
 # --- Дружелюбная проверка наличия ключей ---
 if not os.getenv("OPENAI_API_KEY"):
     print("⚠️ OPENAI_API_KEY не найден в .env")
@@ -42,7 +35,6 @@ if not os.getenv("TELEGRAM_BOT_TOKEN"):
     print("⚠️ TELEGRAM_BOT_TOKEN не найден в .env")
 
 # ==== OpenAI (>=1.0.0) ====
-
 OPENAI_AVAILABLE = False
 MODEL_ID = os.getenv("OPENAI_MODEL_ID")
 
@@ -95,7 +87,7 @@ contact_kb = ReplyKeyboardMarkup(
 
 def parse_tz(text: str):
     """Понимает 'Europe/Moscow', 'UTC+3', 'GMT+3', '+3', '-5' -> tzinfo."""
-    t = text.strip()
+    t = (text or "").strip()
     # IANA-таймзона
     if "/" in t:
         try:
@@ -179,100 +171,6 @@ def calculate_calorie_range(tdee, goal):
     else:  # Набрать массу
         return tdee, tdee + 300
 
-async def clarify_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-
-    user_id = query.from_user.id
-    data = users_data.get(user_id, {})
-    pending = data.get("pending_meal")
-    if not pending:
-        await query.edit_message_reply_markup(None)
-        await query.message.reply_text("Нет активной оценки. Отправь приём пищи текстом.")
-        return
-
-    action = query.data
-    # базовая оценка
-    base_cals = pending.get("base_calories", 0)
-    adj = pending.setdefault("adjust", {"portion": 1.0, "oil_extra": 0})
-
-    if action == "portion_small":
-        adj["portion"] = 0.85
-    elif action == "portion_normal":
-        adj["portion"] = 1.0
-    elif action == "portion_big":
-        adj["portion"] = 1.15
-    elif action == "oil_none":
-        adj["oil_extra"] = 0
-    elif action == "oil_tsp":
-        adj["oil_extra"] = 45   # ~1 ч.л. масла ~ 45 ккал
-    elif action == "oil_tbsp":
-        adj["oil_extra"] = 120  # ~1 ст.л. масла ~ 120 ккал
-
-    # пересчёт
-    cals = int(round(base_cals * adj["portion"] + adj["oil_extra"]))
-    pending["calories"] = cals
-
-    # промежуточное обновление подписи
-    if action != "finalize":
-        txt = (f"Уточняем… Сейчас выходит ~{cals} ккал.\n"
-               f"Выбери размер порции и масло, затем нажми «Готово ✅».")
-        await query.edit_message_text(txt, reply_markup=_clarify_kb())
-        return
-
-    # финализация: пишем в дневник и убираем кнопки
-    meal_entry = {
-        "time": pending["time"],
-        "calories": cals,
-        "protein": pending.get("protein"),
-        "fat": pending.get("fat"),
-        "carbs": pending.get("carbs"),
-        "raw": pending.get("raw"),
-        "auto": True,
-        "adjust": adj,
-    }
-
-    users_data.setdefault(user_id, {}).setdefault("meals", []).append(meal_entry)
-    users_data[user_id]["pending_meal"] = None
-
-    # --- Персонализированное напоминание ---
-    meal_kind = pending.get("meal_kind")
-    if meal_kind in ("soup", "eggs", "omelette"):
-        delay = timedelta(hours=2)
-        reminder_text = "Важно покушать через 2 часа после супа или яичницы!"
-    else:
-        delay = timedelta(hours=3)
-        reminder_text = "Через 3 часа после этого приёма пищи важно позаботиться о себе и покушать!"
-
-    async def personalized_reminder(context: ContextTypes.DEFAULT_TYPE):
-        try:
-            await context.bot.send_message(chat_id=user_id, text=reminder_text)
-        except Exception as e:
-            logger.error(f"Ошибка отправки персонального напоминания пользователю {user_id}: {e}")
-
-    context.application.job_queue.run_once(personalized_reminder, when=delay)
-
-    await query.edit_message_reply_markup(None)
-    await query.message.reply_text(f"Записано: {cals} ккал ✅")
-    
-    save_meal(
-        user_id,
-        meal_entry["time"],
-        meal_entry["calories"],
-        meal_entry.get("protein"),
-        meal_entry.get("fat"),
-        meal_entry.get("carbs"),
-        meal_entry.get("raw"),
-        meal_entry.get("meal_kind"),
-        meal_entry["adjust"].get("portion", 1.0),
-        meal_entry["adjust"].get("oil_extra", 0)
-    )
-    
-def _clarify_kb():
-    return InlineKeyboardMarkup([
-        [InlineKeyboardButton("Готово ✅", callback_data="finalize")]
-    ])
-
 OPENAI_SYSTEM_PROMPT = """
 Ты — добрый, заботливый нутрициолог, помогающий людям восстановить режим питания. Пользователь присылает состав/описание приёма пищи, а твоя задача — аккуратно оценить КБЖУ и время до следующего приёма. Думай реалистичными порциями и типовыми продуктами; если описание расплывчатое, выбирай консервативную (более скромную) оценку.
 
@@ -338,8 +236,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         users_data[user.id] = data
     else:
         users_data.setdefault(user.id, {})
-        
-    user = update.message.from_user
+
     users_data.setdefault(user.id, {})
     logger.info(f"Пользователь {user.id} ({user.full_name}) начал диалог")
 
@@ -508,17 +405,15 @@ async def show_calorie_corridor(update: Update, context: ContextTypes.DEFAULT_TY
     await update.message.reply_text(
         f"Ваш коридор калорий на сегодня: {round(lower)} - {round(upper)} ккал.\n"
         "Теперь можете вносить приёмы пищи в свободной форме — например: «два варёных яйца и яблоко».\n"
-        "Я сам посчитаю КБЖУ через ChatGPT, предложу уточнение порции и поставлю напоминания."
+        "Я сам посчитаю КБЖУ через ChatGPT и поставлю напоминания."
     )
     save_user_data(user.id, users_data[user.id])
-    # Сразу переходим в режим мониторинга
     return MONITORING
 
 async def monitoring(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Режим мониторинга: здесь бот просто ждёт входящих сообщений с едой/калориями."""
+    """Режим мониторинга: просто ждём сообщения с едой/калориями."""
     user = update.message.from_user
     users_data.setdefault(user.id, {})
-    # Подсказка пользователю, если он прислал что-то непонятное
     await update.message.reply_text(
         "Я в режиме мониторинга — присылай приёмы пищи в свободной форме (например: «2 яйца, 200 г гречки, салат»)\n"
         "или калории числом с единицами (например: «350 ккал»). "
@@ -526,32 +421,44 @@ async def monitoring(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
     return MONITORING
 
-# ==== Обновлённый record_meal (с уточнениями) ====
-# ...existing code...
-
+# ==== Запись приёма пищи (без уточнений) ====
 async def record_meal(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.message.from_user
     user_id = user.id
-    text = update.message.text.strip().lower()
+    text = (update.message.text or "").strip()
     data = users_data.setdefault(user_id, {})
 
     if "goal" not in data:
         await update.message.reply_text("Пожалуйста, начните с команды /start")
         return RECORD_MEAL
 
-    # Разрешаем считать калории вручную ТОЛЬКО когда есть единицы "ккал/кал/kcal"
+    # Ручной ввод калорий (только если явно есть единицы)
+    t_low = text.lower()
     cal_match = re.search(
         r"(\d+(?:[.,]\d+)?)\s*(?:к+кал+|кал+|калл+|калорий|ккалл+|k+cal+|kcals?|cal(?:ories)?)\b",
-        text
+        t_low
     )
-
     if cal_match:
-        # Ручной ввод калорий
         val = cal_match.group(1)
         cals = int(float(val.replace(",", ".")))
         now = now_local(user_id)
         data.setdefault("meals", []).append({"time": now, "calories": cals, "raw": text})
-        data["pending_meal"] = None  # <--- вот эта строка
+        data["pending_meal"] = None
+
+        # Сохраняем в БД
+        save_meal(
+            user_id=user_id,
+            time_obj=now,
+            calories=cals,
+            protein=None,
+            fat=None,
+            carbs=None,
+            raw=text,
+            meal_kind="snack",
+            portion=1.0,
+            oil_extra=0
+        )
+
         logger.info(f"[manual] Пользователь {user_id}: {cals} ккал ({text})")
         await update.message.reply_text(f"Записано: {cals} ккал (ручной ввод).")
         return RECORD_MEAL
@@ -561,7 +468,7 @@ async def record_meal(update: Update, context: ContextTypes.DEFAULT_TYPE):
     nutri = {}
     if OPENAI_AVAILABLE and client is not None:
         try:
-            nutri = await estimate_meal_nutrition(text)
+            nutri = await estimate_meal_nutrition(t_low)
         except Exception as e:
             logger.warning(f"Ошибка OpenAI для {user_id}: {e}")
 
@@ -572,33 +479,62 @@ async def record_meal(update: Update, context: ContextTypes.DEFAULT_TYPE):
         logger.warning(f"Автооценка не удалась (OpenAI): '{text}' от {user_id}")
         return RECORD_MEAL
 
-    # Готовим «ожидающую запись» и показываем клавиатуру уточнений
-    base_cals = int(nutri["calories"])
-    
-    pending = {
-    "time": now_local(user_id),
-    "raw": text,
-    "base_calories": base_cals,
-    "protein": nutri.get("protein_g"),
-    "fat": nutri.get("fat_g"),
-    "carbs": nutri.get("carbs_g"),
-    "meal_kind": nutri.get("meal_kind"),  # <--- добавить эту строку
-    "adjust": {"portion": 1.0, "oil_extra": 0}
+    # Записываем сразу
+    now = now_local(user_id)
+    cals = int(nutri["calories"])
+    p = nutri.get("protein_g")
+    f = nutri.get("fat_g")
+    ch = nutri.get("carbs_g")
+    meal_kind = nutri.get("meal_kind") or "plate"
+
+    meal_entry = {
+        "time": now,
+        "calories": cals,
+        "protein": p,
+        "fat": f,
+        "carbs": ch,
+        "raw": text,
+        "meal_kind": meal_kind,
+        "auto": True,
     }
+    data.setdefault("meals", []).append(meal_entry)
 
-    data["pending_meal"] = pending  # <--- обязательно сохраняем!
-
-    p, f, ch = nutri.get("protein_g"), nutri.get("fat_g"), nutri.get("carbs_g")
-    macros = f"\nБ: {p or '-'} г • Ж: {f or '-'} г • У: {ch or '-'} г"
-    txt = (
-        f"Предварительно: ~{base_cals} ккал за «{text}».{macros}\n\n"
-        "Уточни размер порции и масло, затем нажми «Готово ✅»."
+    # Сохраняем в БД
+    save_meal(
+        user_id=user_id,
+        time_obj=now,
+        calories=cals,
+        protein=p,
+        fat=f,
+        carbs=ch,
+        raw=text,
+        meal_kind=meal_kind,
+        portion=1.0,
+        oil_extra=0
     )
-    await update.message.reply_text(txt, reply_markup=_clarify_kb())
+
+    # Персональное напоминание сразу
+    if meal_kind == "soup" or ("яич" in t_low) or ("омлет" in t_low) or ("яйц" in t_low):
+        delay = timedelta(hours=2)
+        reminder_text = "Важно покушать через 2 часа после лёгкого блюда (суп/яйца)!"
+    else:
+        delay = timedelta(hours=3)
+        reminder_text = "Через 3 часа после этого приёма пищи важно позаботиться о себе и покушать!"
+
+    async def personalized_reminder(context: ContextTypes.DEFAULT_TYPE):
+        try:
+            await context.bot.send_message(chat_id=user_id, text=reminder_text)
+        except Exception as e:
+            logger.error(f"Ошибка отправки персонального напоминания пользователю {user_id}: {e}")
+
+    context.application.job_queue.run_once(personalized_reminder, when=delay)
+
+    macros = f"\nБ: {round(p,1)} г • Ж: {round(f,1)} г • У: {round(ch,1)} г" if all(x is not None for x in (p, f, ch)) else ""
+    gap = 2 if delay == timedelta(hours=2) else 3
+    await update.message.reply_text(f"Записано: ~{cals} ккал.{macros}\nСледующий приём через ~{gap} ч.")
     return RECORD_MEAL
 
-# ...existing code...
-
+# ==== Напоминалки и отчёты ====
 async def reminder_4h(context: ContextTypes.DEFAULT_TYPE):
     user_id = context.job.data
     now = now_local(user_id)
@@ -655,54 +591,16 @@ async def handle_weight(update: Update, context: ContextTypes.DEFAULT_TYPE):
         users_data.setdefault(user.id, {}).setdefault("weights", []).append({"date": datetime.now().date(), "weight": weight})
         await update.message.reply_text(f"Спасибо, вес {weight} кг записан.")
         logger.info(f"Пользователь {user.id} ввел вес: {weight}")
-
-        # Сохраняем в базу
         save_weight(user.id, datetime.now().date(), weight)
     except ValueError:
         await update.message.reply_text("Пожалуйста, введи корректное число для веса (например, 70.5).")
         logger.warning(f"Некорректный вес от {user.id}: {update.message.text}")
-        
-# ==== Evening report and morning request ====
-async def evening_report(context: ContextTypes.DEFAULT_TYPE):
-    now = datetime.now()
-    date_today = now.date()
-    for user_id, data in users_data.items():
-        meals = [m for m in data.get("meals", []) if m["time"].date() == date_today]
-        if not meals:
-            continue
-        calories_today = sum(m["calories"] for m in meals)
-        meals_count = len(meals)
-        prot = sum((m.get("protein_g") if m.get("protein_g") is not None else 0) for m in meals)
-        fat = sum((m.get("fat_g") if m.get("fat_g") is not None else 0) for m in meals)
-        carb = sum((m.get("carbs_g") if m.get("carbs_g") is not None else 0) for m in meals)
 
-        text = (
-            "Итог дня:\n"
-            f"• Калории: {calories_today} ккал\n"
-            f"• Приёмов пищи: {meals_count}\n"
-            f"• КБЖУ: Б {round(prot, 1)} г / Ж {round(fat, 1)} г / У {round(carb, 1)} г\n"
-            "Совет: старайтесь держать белок в норме и собирать полноценную тарелку (гарнир+белок+овощи). "
-            "После супа — перекус через ~2 часа; после полноценного блюда — выдерживайте до ~4 часов."
-        )
-        try:
-            await context.bot.send_message(chat_id=user_id, text=text)
-        except Exception as e:
-            logger.error(f"Ошибка вечернего отчёта {user_id}: {e}")
-
-
-async def morning_weight_request(context: ContextTypes.DEFAULT_TYPE):
-    for user_id in users_data.keys():
-        try:
-            await context.bot.send_message(chat_id=user_id, text="Доброе утро! Пожалуйста, сообщите свой текущий вес.")
-        except Exception as e:
-            logger.error(f"Ошибка при запросе утреннего веса: {e}")
-            
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = (
         "ℹ️ <b>Помощь по боту</b>\n\n"
         "• Просто напишите, что вы поели — бот сам оценит калории.\n"
         "• Можно указать калории вручную: <code>350 ккал</code>\n"
-        "• Для уточнения порции и масла используйте кнопки после автооценки.\n"
         "• Введите вес числом, чтобы записать взвешивание.\n"
         "• Команда /report покажет дневной отчёт.\n"
         "• Команда /start — сбросить настройки и начать заново.\n"
@@ -717,7 +615,6 @@ async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("Диалог завершен. Если хотите начать сначала, нажмите /start", reply_markup=ReplyKeyboardRemove())
     return ConversationHandler.END
 
-
 # ==== Error handler ====
 async def on_error(update: object, context: ContextTypes.DEFAULT_TYPE):
     logger.exception("Ошибка во время обработки апдейта", exc_info=context.error)
@@ -725,7 +622,7 @@ async def on_error(update: object, context: ContextTypes.DEFAULT_TYPE):
 # ==== Main ====
 def main():
     print("main() запущен")
-    
+
     create_tables()
 
     token = os.getenv("TELEGRAM_BOT_TOKEN")
@@ -767,16 +664,13 @@ def main():
         fallbacks=[CommandHandler("cancel", cancel)],
         allow_reentry=True,
     )
-    
+
     application.add_handler(conv_handler)
-    application.add_handler(CallbackQueryHandler(clarify_callback))
     application.add_handler(MessageHandler(filters.Regex(r"^\d+(?:[.,]\d+)?$"), handle_weight))
     application.add_error_handler(on_error)
-
-    # Добавьте help-хендлер здесь:
     application.add_handler(CommandHandler("help", help_command))
 
-    # ВАЖНО: не ставим глобальные run_daily — они теперь персональные (ставятся после выбора TZ/часов)
+    # Персональные run_daily ставятся после выбора TZ/часов (см. schedule_user_jobs)
 
     application.run_polling(allowed_updates=Update.ALL_TYPES)
 
