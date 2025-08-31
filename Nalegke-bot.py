@@ -1,5 +1,4 @@
-from dotenv import load_dotenv
-load_dotenv(encoding="utf-8")
+import httpx
 import asyncio
 import json
 import logging
@@ -7,6 +6,14 @@ import os
 import re
 from datetime import datetime, time, timedelta, timezone
 from zoneinfo import ZoneInfo
+
+from dotenv import load_dotenv
+load_dotenv(encoding="utf-8")
+
+# --- Telegram должен ходить БЕЗ системных прокси ---
+for k in ("HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "http_proxy", "https_proxy", "all_proxy"):
+    os.environ.pop(k, None)
+os.environ.setdefault("NO_PROXY", "api.telegram.org")
 
 from openai import OpenAI
 from telegram import (
@@ -17,29 +24,10 @@ from telegram.ext import (
     ApplicationBuilder, CommandHandler, MessageHandler,
     filters, ConversationHandler, ContextTypes
 )
-
 from db import (
     create_tables, save_user_data, load_user_data,
     save_weight, save_meal, analyze_user_day
 )
-
-# --- Дружелюбная проверка наличия ключей ---
-if not os.getenv("OPENAI_API_KEY"):
-    print("⚠️ OPENAI_API_KEY не найден в .env")
-if not os.getenv("TELEGRAM_BOT_TOKEN"):
-    print("⚠️ TELEGRAM_BOT_TOKEN не найден в .env")
-
-# ==== OpenAI (>=1.0.0) ====
-OPENAI_AVAILABLE = False
-MODEL_ID = os.getenv("OPENAI_MODEL_ID")
-
-try:
-    client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
-    OPENAI_AVAILABLE = True
-except Exception as e:
-    client = None
-    OPENAI_AVAILABLE = False
-    logging.error(f"Ошибка инициализации OpenAI: {e}")
 
 # ==== Logging ====
 logging.basicConfig(
@@ -49,36 +37,34 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# ==== Dialogue states ====
-(
-    ASK_CONTACT,
-    ASK_TZ,
-    ASK_MORNING_HOUR,
-    ASK_EVENING_HOUR,
-    ASK_NAME,
-    ASK_GENDER,
-    ASK_AGE,
-    ASK_WEIGHT,
-    ASK_HEIGHT,
-    ASK_ACTIVITY,
-    ASK_GOAL,
-    RECORD_MEAL,
-    MONITORING,
-) = range(13)
+# --- Дружелюбная проверка наличия ключей ---
+if not os.getenv("OPENAI_API_KEY"):
+    logger.warning("OPENAI_API_KEY не найден в .env")
+if not os.getenv("TELEGRAM_BOT_TOKEN"):
+    logger.warning("TELEGRAM_BOT_TOKEN не найден в .env")
 
-users_data = {}
+# ==== OpenAI (>=1.0.0) ====
+OPENAI_AVAILABLE = False
+MODEL_ID = os.getenv("OPENAI_MODEL_ID") or "gpt-4o-mini"
 
-# ==== Keyboards ====
-gender_kb = ReplyKeyboardMarkup([["Мужской", "Женский"]], one_time_keyboard=True, resize_keyboard=True)
-activity_kb = ReplyKeyboardMarkup([["1", "2", "3", "4", "5"]], one_time_keyboard=True, resize_keyboard=True)
-goal_kb = ReplyKeyboardMarkup([["Похудеть", "Удержать вес", "Набрать массу"]], one_time_keyboard=True, resize_keyboard=True)
+# --- опциональный прокси только для OpenAI ---
+OPENAI_PROXY_URL = os.getenv("OPENAI_PROXY_URL")  # например: socks5h://127.0.0.1:12334
+http_client = None
+if OPENAI_PROXY_URL:
+    try:
+        transport = httpx.HTTPTransport(proxy=OPENAI_PROXY_URL)
+        http_client = httpx.Client(transport=transport, timeout=60.0)
+        logger.info(f"Using OpenAI proxy: {OPENAI_PROXY_URL}")
+    except Exception as e:
+        logger.warning(f"Failed to init OpenAI proxy {OPENAI_PROXY_URL}: {e}")
 
-# Кнопка «поделиться контактом» + «Пропустить»
-contact_kb = ReplyKeyboardMarkup(
-    [[KeyboardButton("Поделиться контактом ☎️", request_contact=True)],
-     ["Пропустить"]],
-    resize_keyboard=True, one_time_keyboard=True
-)
+try:
+    client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"), http_client=http_client)
+    OPENAI_AVAILABLE = True
+except Exception as e:
+    client = None
+    OPENAI_AVAILABLE = False
+    logger.error(f"Ошибка инициализации OpenAI: {e}")
 
 def parse_tz(text: str):
     """Понимает 'Europe/Moscow', 'UTC+3', 'GMT+3', '+3', '-5' -> tzinfo."""
