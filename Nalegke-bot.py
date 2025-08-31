@@ -65,6 +65,40 @@ except Exception as e:
     client = None
     OPENAI_AVAILABLE = False
     logger.error(f"Ошибка инициализации OpenAI: {e}")
+    
+# ==== Dialogue states ====
+(
+    ASK_CONTACT,
+    ASK_TZ,
+    ASK_MORNING_HOUR,
+    ASK_EVENING_HOUR,
+    ASK_NAME,
+    ASK_GENDER,
+    ASK_AGE,
+    ASK_WEIGHT,
+    ASK_HEIGHT,
+    ASK_ACTIVITY,
+    ASK_GOAL,
+    RECORD_MEAL,
+    MONITORING,
+) = range(13)
+
+users_data = {}
+
+# ==== Keyboards ====
+from telegram import KeyboardButton  # если уже импортирован выше — второй раз не нужно
+from telegram import ReplyKeyboardMarkup, ReplyKeyboardRemove  # тоже только если не импортировано
+
+gender_kb = ReplyKeyboardMarkup([["Мужской", "Женский"]], one_time_keyboard=True, resize_keyboard=True)
+activity_kb = ReplyKeyboardMarkup([["1", "2", "3", "4", "5"]], one_time_keyboard=True, resize_keyboard=True)
+goal_kb = ReplyKeyboardMarkup([["Похудеть", "Удержать вес", "Набрать массу"]], one_time_keyboard=True, resize_keyboard=True)
+
+# Кнопка «поделиться контактом» + «Пропустить»
+contact_kb = ReplyKeyboardMarkup(
+    [[KeyboardButton("Поделиться контактом ☎️", request_contact=True)],
+     ["Пропустить"]],
+    resize_keyboard=True, one_time_keyboard=True
+)
 
 def parse_tz(text: str):
     """Понимает 'Europe/Moscow', 'UTC+3', 'GMT+3', '+3', '-5' -> tzinfo."""
