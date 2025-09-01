@@ -5,7 +5,7 @@ from telegram.ext import (
 )
 
 from config import TELEGRAM_BOT_TOKEN
-from handlers.start_flow import start, handle_contact_or_skip, handle_timezone, handle_morning_hour, handle_evening_hour, ask_gender, ask_age, ask_weight, ask_height, ask_activity, ask_goal, show_calorie_corridor
+from handlers.start_flow import start, handle_contact_or_skip, handle_local_time, handle_morning_hour, handle_evening_hour, ask_gender, ask_age, ask_weight, ask_height, ask_activity, ask_goal, show_calorie_corridor
 from handlers.meals import record_meal
 from handlers.misc import help_command, cancel, handle_weight, on_error
 from states import BotState
@@ -24,7 +24,7 @@ def main():
             BotState.ASK_CONTACT: [
                 MessageHandler(filters.CONTACT | filters.Regex("(?i)^пропустить$"), handle_contact_or_skip)
             ],
-            BotState.ASK_TZ: [MessageHandler(filters.TEXT & ~filters.COMMAND, handle_timezone)],
+            BotState.ASK_TZ: [MessageHandler(filters.TEXT & ~filters.COMMAND, handle_local_time)],
             BotState.ASK_MORNING_HOUR: [MessageHandler(filters.Regex(r"^\d{2}:00$"), handle_morning_hour)],
             BotState.ASK_EVENING_HOUR: [MessageHandler(filters.Regex(r"^\d{2}:00$"), handle_evening_hour)],
 

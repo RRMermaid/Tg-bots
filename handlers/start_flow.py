@@ -1,4 +1,5 @@
 import re
+from datetime import datetime, timedelta
 from telegram import Update, ReplyKeyboardRemove, Contact
 from telegram.ext import ContextTypes
 from keyboards import contact_kb, hour_kb, gender_kb, activity_kb, goal_kb
@@ -26,18 +27,39 @@ async def handle_contact_or_skip(update: Update, context: ContextTypes.DEFAULT_T
         pass
     elif update.message and isinstance(update.message.contact, Contact):
         d["phone"] = update.message.contact.phone_number
-    await update.message.reply_text(ASK_TZ, reply_markup=ReplyKeyboardRemove())
-    return BotState.ASK_TZ
+    # новый вопрос вместо ASK_TZ
+    from texts import ASK_LOCAL_TIME
+    await update.message.reply_text(ASK_LOCAL_TIME, reply_markup=ReplyKeyboardRemove())
+    return BotState.ASK_LOCAL_TIME
 
-async def handle_timezone(update: Update, context: ContextTypes.DEFAULT_TYPE):
+
+async def handle_local_time(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Пользователь ввёл локальное время (HH:MM), вычисляем смещение относительно сервера."""
     user = update.effective_user
-    tz = parse_tz(update.message.text or "")
-    if not tz:
-        await update.message.reply_text("Не получилось распознать. Пример: Europe/Moscow или UTC+3. Попробуй снова:")
-        return BotState.ASK_TZ
-    users_data.setdefault(user.id, {})["tzinfo"] = tz
-    await update.message.reply_text("Принято! Во сколько удобно присылать утренний запрос веса? Выбери час:", reply_markup=hour_kb(6, 11))
-    return BotState.ASK_MORNING_HOUR
+    text = (update.message.text or "").strip()
+
+    try:
+        hh, mm = map(int, text.split(":"))
+        now_server = datetime.now().replace(second=0, microsecond=0)
+        user_time = now_server.replace(hour=hh, minute=mm)
+
+        # разница в минутах (может быть отрицательной)
+        offset_minutes = int((user_time - now_server).total_seconds() / 60)
+
+        users_data.setdefault(user.id, {})["tz_offset"] = offset_minutes
+
+        # сохраним в БД (если добавлено поле tz_offset)
+        save_user_data(user.id, users_data[user.id])
+
+        await update.message.reply_text(
+            "Принято! Во сколько удобно присылать утренний запрос веса? Выбери час:",
+            reply_markup=hour_kb(6, 11)
+        )
+        return BotState.ASK_MORNING_HOUR
+
+    except Exception:
+        await update.message.reply_text("Пожалуйста, укажи время в формате HH:MM (например, 09:30).")
+        return BotState.ASK_LOCAL_TIME
 
 async def handle_morning_hour(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user

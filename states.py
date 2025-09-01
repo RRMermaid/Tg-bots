@@ -14,3 +14,5 @@ class BotState(IntEnum):
     ASK_GOAL = 10
     RECORD_MEAL = 11
     MONITORING = 12
+    ASK_LOCAL_TIME = 99
+    
