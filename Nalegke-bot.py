@@ -5,11 +5,18 @@ from telegram.ext import (
 )
 
 from config import TELEGRAM_BOT_TOKEN
-from handlers.start_flow import start, handle_contact_or_skip, handle_local_time, handle_morning_hour, handle_evening_hour, ask_gender, ask_age, ask_weight, ask_height, ask_activity, ask_goal, show_calorie_corridor
+from handlers.start_flow import (
+    start, handle_contact_or_skip, handle_local_time,
+    handle_morning_hour, handle_evening_hour,
+    ask_gender, ask_age, ask_weight, ask_height,
+    ask_activity, ask_goal, show_calorie_corridor
+)
 from handlers.meals import record_meal
 from handlers.misc import help_command, cancel, handle_weight, on_error
+from handlers.analyze import analyze_day_command   # ⬅️ новый импорт
 from states import BotState
 from logging_config import setup_logging
+
 
 def main():
     setup_logging()
@@ -46,9 +53,11 @@ def main():
     app.add_handler(conv)
     app.add_handler(MessageHandler(filters.Regex(r"^\d+(?:[.,]\d+)?$"), handle_weight))
     app.add_handler(CommandHandler("help", help_command))
+    app.add_handler(CommandHandler("analyze_day", analyze_day_command))   # ⬅️ новая команда
     app.add_error_handler(on_error)
 
     app.run_polling(allowed_updates=Update.ALL_TYPES)
+
 
 if __name__ == "__main__":
     main()
