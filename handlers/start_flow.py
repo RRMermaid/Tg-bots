@@ -4,7 +4,7 @@ from telegram import Update, ReplyKeyboardRemove, Contact
 from telegram.ext import ContextTypes
 from keyboards import contact_kb, hour_kb, gender_kb, activity_kb, goal_kb
 from states import BotState
-from texts import HELLO, ASK_TZ
+from texts import HELLO, ASK_LOCAL_TIME
 from services.storage import users_data
 from domain.tz import parse_tz
 from services.scheduler import schedule_user_jobs
@@ -27,7 +27,7 @@ async def handle_contact_or_skip(update: Update, context: ContextTypes.DEFAULT_T
         pass
     elif update.message and isinstance(update.message.contact, Contact):
         d["phone"] = update.message.contact.phone_number
-    # новый вопрос вместо ASK_TZ
+    # новый вопрос вместо ASK_LOCAL_TIME
     from texts import ASK_LOCAL_TIME
     await update.message.reply_text(ASK_LOCAL_TIME, reply_markup=ReplyKeyboardRemove())
     return BotState.ASK_LOCAL_TIME

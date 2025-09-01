@@ -2,7 +2,6 @@ from enum import IntEnum
 
 class BotState(IntEnum):
     ASK_CONTACT = 0
-    ASK_TZ = 1
     ASK_MORNING_HOUR = 2
     ASK_EVENING_HOUR = 3
     ASK_NAME = 4

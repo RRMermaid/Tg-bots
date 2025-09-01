@@ -24,7 +24,7 @@ def main():
             BotState.ASK_CONTACT: [
                 MessageHandler(filters.CONTACT | filters.Regex("(?i)^пропустить$"), handle_contact_or_skip)
             ],
-            BotState.ASK_TZ: [MessageHandler(filters.TEXT & ~filters.COMMAND, handle_local_time)],
+            BotState.ASK_LOCAL_TIME: [MessageHandler(filters.TEXT & ~filters.COMMAND, handle_local_time)],
             BotState.ASK_MORNING_HOUR: [MessageHandler(filters.Regex(r"^\d{2}:00$"), handle_morning_hour)],
             BotState.ASK_EVENING_HOUR: [MessageHandler(filters.Regex(r"^\d{2}:00$"), handle_evening_hour)],
 
