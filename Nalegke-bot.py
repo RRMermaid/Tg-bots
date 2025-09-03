@@ -22,12 +22,26 @@ from services.storage import users_data
 from db import load_all_users
 
 
+async def handle_any_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """
+    Универсальный обработчик текста:
+    - если пользователь уже есть в БД → пишем еду,
+    - если нет → просим начать с /start.
+    """
+    uid = update.effective_user.id
+    if uid in users_data and "goal" in users_data[uid]:
+        return await record_meal(update, context)
+    else:
+        await update.message.reply_text("Пожалуйста, начните с команды /start")
+        return BotState.ASK_CONTACT
+
+
 def main():
     setup_logging()
     if not TELEGRAM_BOT_TOKEN:
         raise RuntimeError("TELEGRAM_BOT_TOKEN не задан в .env")
 
-    # 🆕 Подгружаем всех пользователей из БД в кэш при запуске
+    # 🔥 Загружаем всех пользователей из БД в кэш при запуске
     try:
         users_data.update(load_all_users())
     except Exception as e:
@@ -53,18 +67,23 @@ def main():
             BotState.ASK_HEIGHT:  [MessageHandler(filters.TEXT & ~filters.COMMAND, ask_activity)],
             BotState.ASK_ACTIVITY:[MessageHandler(filters.Regex("^[1-5]{1}$"), ask_goal)],
             BotState.ASK_GOAL:    [MessageHandler(filters.Regex("^(Похудеть|Удержать вес|Набрать массу)$"), show_calorie_corridor)],
-
-            BotState.RECORD_MEAL: [MessageHandler(filters.TEXT & ~filters.COMMAND, record_meal)],
-            BotState.MONITORING:  [MessageHandler(filters.TEXT & ~filters.COMMAND, record_meal)],
         },
         fallbacks=[CommandHandler("cancel", cancel)],
         allow_reentry=True,
     )
 
     app.add_handler(conv)
+
+    # Обработчик чисел → сохраняем вес
     app.add_handler(MessageHandler(filters.Regex(r"^\d+(?:[.,]\d+)?$"), handle_weight))
+
+    # Команды
     app.add_handler(CommandHandler("help", help_command))
     app.add_handler(CommandHandler("analyze_day", analyze_day_command))
+
+    # 🆕 Универсальный обработчик текста для старых пользователей
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_any_text))
+
     app.add_error_handler(on_error)
 
     app.run_polling(allowed_updates=Update.ALL_TYPES)
