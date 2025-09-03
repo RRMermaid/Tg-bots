@@ -2,6 +2,9 @@ from telegram.ext import ContextTypes
 from services.storage import users_data
 from domain.tz import now_local
 from db import analyze_user_day
+from services.openai_service import get_client
+import asyncio
+import logging
 
 async def reminder_4h(context: ContextTypes.DEFAULT_TYPE):
     user_id = context.job.data
@@ -9,14 +12,36 @@ async def reminder_4h(context: ContextTypes.DEFAULT_TYPE):
     if now.hour >= 21:
         return
     try:
-        await context.bot.send_message(chat_id=user_id, text="Критично важно покушать примерно сейчас!")
+        await context.bot.send_message(chat_id=user_id, text="Критично важно покушать уже сейчас!")
     except Exception:
         pass
 
 async def morning_weight_request_user(context: ContextTypes.DEFAULT_TYPE):
     user_id = context.job.data
+    data = users_data.get(user_id, {}) or {}
+    name = data.get("name", "друг")
+    gender = data.get("gender", "Мужской")
+    client = get_client()
+    if not client:
+        message = f"Доброе утро, {name}! Пора взвеситься 🌤️"
+    else:
+        try:
+            resp = await asyncio.to_thread(
+                client.chat.completions.create,
+                model="gpt-4o-mini",
+                messages=[
+                    {"role": "system", "content": "Ты заботливый ассистент. Придумай уникальное приветствие."},
+                    {"role": "user", "content": f"Сгенерируй доброе утреннее приветствие для пользователя по имени {name}. Пол: {gender}. Приветствие должно быть тёплым, поддерживающим и всегда разным."}
+                ],
+                temperature=0.9,
+                max_tokens=80,
+            )
+            message = resp.choices[0].message.content.strip()
+        except Exception as e:
+            logging.getLogger(__name__).warning(f"Ошибка генерации утреннего приветствия: {e}")
+            message = f"Доброе утро, {name}! 🌞 Как твой вес сегодня?"
     try:
-        await context.bot.send_message(chat_id=user_id, text="Доброе утро! Пожалуйста, сообщи свой текущий вес 🌤️")
+        await context.bot.send_message(chat_id=user_id, text=message)
     except Exception:
         pass
 
