@@ -13,15 +13,26 @@ from handlers.start_flow import (
 )
 from handlers.meals import record_meal
 from handlers.misc import help_command, cancel, handle_weight, on_error
-from handlers.analyze import analyze_day_command   # ⬅️ новый импорт
+from handlers.analyze import analyze_day_command
 from states import BotState
 from logging_config import setup_logging
+
+# 🆕 импортируем кэш и загрузку всех пользователей
+from services.storage import users_data
+from db import load_all_users
 
 
 def main():
     setup_logging()
     if not TELEGRAM_BOT_TOKEN:
         raise RuntimeError("TELEGRAM_BOT_TOKEN не задан в .env")
+
+    # 🆕 Подгружаем всех пользователей из БД в кэш при запуске
+    try:
+        users_data.update(load_all_users())
+    except Exception as e:
+        import logging
+        logging.getLogger(__name__).error(f"Не удалось загрузить пользователей из БД: {e}")
 
     app = ApplicationBuilder().token(TELEGRAM_BOT_TOKEN).build()
 
@@ -53,7 +64,7 @@ def main():
     app.add_handler(conv)
     app.add_handler(MessageHandler(filters.Regex(r"^\d+(?:[.,]\d+)?$"), handle_weight))
     app.add_handler(CommandHandler("help", help_command))
-    app.add_handler(CommandHandler("analyze_day", analyze_day_command))   # ⬅️ новая команда
+    app.add_handler(CommandHandler("analyze_day", analyze_day_command))
     app.add_error_handler(on_error)
 
     app.run_polling(allowed_updates=Update.ALL_TYPES)

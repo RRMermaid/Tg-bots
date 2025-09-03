@@ -1,5 +1,7 @@
 import os
 import psycopg2
+import sqlite3
+from datetime import date
 from datetime import timedelta
 from typing import Dict, Any
 
@@ -209,3 +211,17 @@ def analyze_user_day(user_id: int, date_obj):
         )
 
     return advice
+
+def load_all_users() -> dict[int, dict]:
+    """Загружает всех пользователей из БД в словарь {user_id: данные}"""
+    with get_connection() as conn, conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT id, name, phone, tz, age, gender, weight, height, activity, goal
+            FROM users
+            """
+        )
+        rows = cur.fetchall()
+    keys = ("id", "name", "phone", "tz", "age", "gender", "weight", "height", "activity", "goal")
+    return {row[0]: dict(zip(keys, row)) for row in rows}
+
