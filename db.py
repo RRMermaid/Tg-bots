@@ -4,6 +4,7 @@ import sqlite3
 from datetime import date
 from datetime import timedelta
 from typing import Dict, Any
+from datetime import datetime, date
 
 # Берём готовую DSN-строку и доверяем psycopg2 разбор параметров (sslmode, таймауты и т.д.)
 DATABASE_URL = os.getenv("DATABASE_URL")
@@ -225,3 +226,54 @@ def load_all_users() -> dict[int, dict]:
     keys = ("id", "name", "phone", "tz", "age", "gender", "weight", "height", "activity", "goal")
     return {row[0]: dict(zip(keys, row)) for row in rows}
 
+def load_meals_for_today(user_id: int) -> list[str]:
+    """Загружает все приёмы пищи пользователя за сегодня в виде списка строк."""
+    today = date.today()
+    with get_connection() as conn, conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT time, raw
+            FROM meals
+            WHERE user_id = %s AND time::date = %s
+            ORDER BY time
+            """,
+            (user_id, today),
+        )
+        rows = cur.fetchall()
+    return [f"{r[0].strftime('%H:%M')} — {r[1]}" for r in rows] if rows else []
+
+
+def get_weight_trend(user_id: int, days: int = 7) -> str:
+    """
+    Возвращает динамику веса за последние N дней.
+    Например: '+0.5 кг за 7 дней' или 'нет данных'.
+    """
+    with get_connection() as conn, conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT date, weight
+            FROM weights
+            WHERE user_id = %s
+            ORDER BY date ASC
+            """,
+            (user_id,),
+        )
+        rows = cur.fetchall()
+
+    if not rows or len(rows) < 2:
+        return "нет данных"
+
+    # Берём точку N дней назад и последнюю
+    recent = [r for r in rows if (rows[-1][0] - r[0]).days <= days]
+    if len(recent) < 2:
+        return "нет данных"
+
+    start_w = recent[0][1]
+    end_w = recent[-1][1]
+    diff = round(end_w - start_w, 1)
+
+    if diff > 0:
+        return f"+{diff} кг за {days} дней"
+    elif diff < 0:
+        return f"{diff} кг за {days} дней"
+    return f"без изменений за {days} дней"
