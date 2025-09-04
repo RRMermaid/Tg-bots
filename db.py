@@ -70,6 +70,16 @@ def create_tables():
             ON meals (user_id, time);
             """
         )
+        cur.execute(
+    """
+    CREATE TABLE IF NOT EXISTS notifications (
+        id       SERIAL PRIMARY KEY,
+        user_id  BIGINT REFERENCES users(id),
+        kind     TEXT NOT NULL,  -- 'morning' или 'evening'
+        sent_at  TIMESTAMPTZ DEFAULT now()
+    );
+    """
+)
 
 def save_user_data(user_id: int, data: Dict[str, Any]):
     with get_connection() as conn, conn.cursor() as cur:
@@ -161,7 +171,13 @@ def save_meal(
                 oil_extra,
             ),
         )
-
+        
+def save_notification(user_id: int, kind: str):
+    with get_connection() as conn, conn.cursor() as cur:
+        cur.execute(
+            "INSERT INTO notifications (user_id, kind) VALUES (%s, %s)",
+            (user_id, kind),
+        )
 
 def analyze_user_day(user_id: int, date_obj):
     """Простой совет по режиму за указанный день."""
@@ -273,3 +289,18 @@ def get_weight_trend(user_id: int, days: int = 7) -> str:
     elif diff < 0:
         return f"{diff} кг за {days} дней"
     return f"без изменений за {days} дней"
+
+def load_last_notifications(limit: int = 10):
+    """Возвращает последние N уведомлений."""
+    with get_connection() as conn, conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT user_id, kind, sent_at
+            FROM notifications
+            ORDER BY sent_at DESC
+            LIMIT %s
+            """,
+            (limit,),
+        )
+        rows = cur.fetchall()
+    return rows

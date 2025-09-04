@@ -20,7 +20,7 @@ from logging_config import setup_logging
 # 🆕 импортируем кэш и загрузку всех пользователей
 from services.storage import users_data
 from db import load_all_users
-
+from handlers.misc import last_notifications
 
 async def handle_any_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """
@@ -88,6 +88,7 @@ def main():
 
     app.run_polling(allowed_updates=Update.ALL_TYPES)
 
+    application.add_handler(CommandHandler("last_notifications", last_notifications))
 
 if __name__ == "__main__":
     main()

@@ -5,6 +5,7 @@ from db import analyze_user_day
 from services.openai_service import get_client
 import asyncio
 import logging
+from db import save_notification
 
 async def reminder_4h(context: ContextTypes.DEFAULT_TYPE):
     user_id = context.job.data
@@ -31,7 +32,7 @@ async def morning_weight_request_user(context: ContextTypes.DEFAULT_TYPE):
                 model="gpt-4o-mini",
                 messages=[
                     {"role": "system", "content": "Ты заботливый ассистент. Придумай уникальное приветствие."},
-                    {"role": "user", "content": f"Сгенерируй доброе утреннее приветствие для пользователя по имени {name}. Пол: {gender}. Приветствие должно быть тёплым, поддерживающим и всегда разным."}
+                    {"role": "user", "content": f"Сгенерируй доброе утреннее приветствие для пользователя по имени {name}. Пол: {gender}. Приветствие должно быть тёплым, поддерживающим и всегда разным. И попроси пользователя взвеситься."}
                 ],
                 temperature=0.9,
                 max_tokens=80,
@@ -70,5 +71,21 @@ async def evening_report_user(context: ContextTypes.DEFAULT_TYPE):
         advice = analyze_user_day(user_id, date_today)
         if advice:
             await context.bot.send_message(chat_id=user_id, text=advice)
+    except Exception:
+        pass
+
+async def morning_weight_request_user(context: ContextTypes.DEFAULT_TYPE):
+    user_id = context.job.data
+    try:
+        await context.bot.send_message(chat_id=user_id, text="Доброе утро 🌤️ Пора взвеситься!")
+        save_notification(user_id, "morning")
+    except Exception:
+        pass
+
+async def evening_report_user(context: ContextTypes.DEFAULT_TYPE):
+    user_id = context.job.data
+    try:
+        await context.bot.send_message(chat_id=user_id, text="Добрый вечер 🌙 Вот твой дневной отчёт!")
+        save_notification(user_id, "evening")
     except Exception:
         pass
