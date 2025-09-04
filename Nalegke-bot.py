@@ -1,3 +1,12 @@
+import os
+from dotenv import load_dotenv
+
+load_dotenv()  # Загружает переменные окружения из .env
+
+api_key = os.getenv("OPENAI_API_KEY")
+
+from openai import OpenAI
+client = OpenAI(api_key=api_key)
 from telegram import Update
 from telegram.ext import (
     ApplicationBuilder, CommandHandler, MessageHandler,
