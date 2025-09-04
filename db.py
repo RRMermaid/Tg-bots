@@ -1,6 +1,5 @@
 import os
 import psycopg2
-import sqlite3
 from datetime import date
 from datetime import timedelta
 from typing import Dict, Any
@@ -27,7 +26,7 @@ def create_tables():
                 id       BIGINT PRIMARY KEY,
                 name     TEXT,
                 phone    TEXT,
-                tz       TEXT,
+                tz_offset INT DEFAULT 0,
                 age      INT,
                 gender   TEXT,
                 weight   FLOAT,
@@ -72,17 +71,16 @@ def create_tables():
             """
         )
 
-
 def save_user_data(user_id: int, data: Dict[str, Any]):
     with get_connection() as conn, conn.cursor() as cur:
         cur.execute(
             """
-            INSERT INTO users (id, name, phone, tz, age, gender, weight, height, activity, goal)
+            INSERT INTO users (id, name, phone, tz_offset, age, gender, weight, height, activity, goal)
             VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
             ON CONFLICT (id) DO UPDATE SET
                 name     = EXCLUDED.name,
                 phone    = EXCLUDED.phone,
-                tz       = EXCLUDED.tz,
+                tz_offset= EXCLUDED.tz_offset,
                 age      = EXCLUDED.age,
                 gender   = EXCLUDED.gender,
                 weight   = EXCLUDED.weight,
@@ -94,7 +92,7 @@ def save_user_data(user_id: int, data: Dict[str, Any]):
                 user_id,
                 data.get("name"),
                 data.get("phone"),
-                str(data.get("tzinfo")),
+                data.get("tz_offset", 0),
                 data.get("age"),
                 data.get("gender"),
                 data.get("weight"),
@@ -104,12 +102,11 @@ def save_user_data(user_id: int, data: Dict[str, Any]):
             ),
         )
 
-
 def load_user_data(user_id: int) -> Dict[str, Any]:
     with get_connection() as conn, conn.cursor() as cur:
         cur.execute(
             """
-            SELECT id, name, phone, tz, age, gender, weight, height, activity, goal
+            SELECT id, name, phone, tz_offset, age, gender, weight, height, activity, goal
             FROM users
             WHERE id = %s
             """,
@@ -118,9 +115,8 @@ def load_user_data(user_id: int) -> Dict[str, Any]:
         row = cur.fetchone()
     if row is None:
         return {}
-    keys = ("id", "name", "phone", "tz", "age", "gender", "weight", "height", "activity", "goal")
+    keys = ("id", "name", "phone", "tz_offset", "age", "gender", "weight", "height", "activity", "goal")
     return dict(zip(keys, row))
-
 
 def save_weight(user_id: int, date_obj, weight: float):
     with get_connection() as conn, conn.cursor() as cur:
@@ -218,12 +214,12 @@ def load_all_users() -> dict[int, dict]:
     with get_connection() as conn, conn.cursor() as cur:
         cur.execute(
             """
-            SELECT id, name, phone, tz, age, gender, weight, height, activity, goal
+            SELECT id, name, phone, tz_offset, age, gender, weight, height, activity, goal
             FROM users
             """
         )
         rows = cur.fetchall()
-    keys = ("id", "name", "phone", "tz", "age", "gender", "weight", "height", "activity", "goal")
+    keys = ("id", "name", "phone", "tz_offset", "age", "gender", "weight", "height", "activity", "goal")
     return {row[0]: dict(zip(keys, row)) for row in rows}
 
 def load_meals_for_today(user_id: int) -> list[str]:
