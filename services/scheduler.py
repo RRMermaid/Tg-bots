@@ -1,13 +1,11 @@
 from datetime import time, timedelta, timezone, datetime
 from services.storage import users_data
 from handlers.reminders import morning_weight_request_user, evening_report_user
+from domain.tz import get_user_offset
 
 def schedule_user_jobs(app, user_id: int):
     u = users_data.get(user_id, {})
-    tz_offset_minutes = u.get("tz_offset", 0)
-
-    # переводим int → timedelta
-    offset = timedelta(minutes=tz_offset_minutes)
+    offset = get_user_offset(u)
 
     # получаем «системное» время сервера (UTC)
     now_sys = datetime.now(timezone.utc)

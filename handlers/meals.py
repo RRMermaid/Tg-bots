@@ -6,6 +6,7 @@ from services.storage import users_data
 from services.openai_service import estimate_meal_nutrition
 from db import save_meal
 from states import BotState
+from domain.tz import get_user_offset
 
 async def record_meal(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.message.from_user
@@ -17,14 +18,8 @@ async def record_meal(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("Пожалуйста, начните с команды /start")
         return BotState.RECORD_MEAL
 
-    # Получаем смещение часового пояса пользователя (в минутах, int)
-    tz_offset_minutes = data.get("tz_offset", 0)
-
-    # Системное текущее время (UTC)
     now_sys = datetime.now(timezone.utc)
-
-    # Рассчитываем локальное время пользователя с учетом смещения
-    now_user = now_sys + timedelta(minutes=tz_offset_minutes)
+    now_user = now_sys + get_user_offset(data)
 
     # === Ручной ввод калорий ===
     t_low = text.lower()
