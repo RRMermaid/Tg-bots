@@ -19,10 +19,10 @@ OPENAI_PROXY_URL = os.getenv("OPENAI_PROXY_URL")
 # 🔥 безопаснее: если нет в .env → дефолт
 ADMIN_ID = int(os.getenv("ADMIN_ID", "579596451"))
 
-if not TELEGRAM_BOT_TOKEN:
-    logger.warning("⚠️ TELEGRAM_BOT_TOKEN не найден в .env")
-if not OPENAI_API_KEY:
-    logger.warning("⚠️ OPENAI_API_KEY не найден в .env")
+if TELEGRAM_BOT_TOKEN is None:
+    logger.error("❌ TELEGRAM_BOT_TOKEN не найден в .env (бот не запустится)")
+if OPENAI_API_KEY is None:
+    logger.info("ℹ️ OPENAI_API_KEY не найден в .env (бот запустится, но GPT не будет работать)")
 
 def build_http_client_for_openai() -> httpx.Client | None:
     if not OPENAI_PROXY_URL:

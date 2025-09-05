@@ -26,8 +26,7 @@ def get_client() -> OpenAI | None:
     if _client is not None:
         return _client
     if not OPENAI_API_KEY:
-        logger.warning("OPENAI_API_KEY не найден в .env")
-        return None
+        return None  # тихо, без лишних сообщений
     try:
         http_client = build_http_client_for_openai()
         _client = OpenAI(api_key=OPENAI_API_KEY, http_client=http_client)
@@ -35,7 +34,6 @@ def get_client() -> OpenAI | None:
     except Exception as e:
         logger.error(f"Ошибка инициализации OpenAI: {e}")
         return None
-
 
 async def estimate_meal_nutrition(text: str) -> dict:
     client = get_client()
