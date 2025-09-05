@@ -15,12 +15,6 @@ TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 OPENAI_MODEL_ID = os.getenv("OPENAI_MODEL_ID") or "gpt-4o-mini"
 OPENAI_PROXY_URL = os.getenv("OPENAI_PROXY_URL")
-ADMIN_ID = 579596451
-
-if not TELEGRAM_BOT_TOKEN:
-    logger.error("❌ TELEGRAM_BOT_TOKEN не найден в .env — бот не запустится без него.")
-if not OPENAI_API_KEY:
-    logger.info("ℹ️ OPENAI_API_KEY не найден в .env — GPT функции будут отключены.")
 
 def build_http_client_for_openai() -> httpx.Client | None:
     if not OPENAI_PROXY_URL:
