@@ -1,12 +1,11 @@
-import os
-from dotenv import load_dotenv
+#import os
+#from dotenv import load_dotenv
 
-load_dotenv()  # Загружает переменные окружения из .env
+#load_dotenv()  # Загружает переменные окружения из .env
 
-api_key = os.getenv("OPENAI_API_KEY")
+#api_key = os.getenv("OPENAI_API_KEY")
 
-if not api_key:
-    raise RuntimeError("OPENAI_API_KEY отсутствует в окружении")
+api_key = "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"
 
 from openai import OpenAI
 client = OpenAI(api_key=api_key)
