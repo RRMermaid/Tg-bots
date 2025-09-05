@@ -146,23 +146,37 @@ async def ask_goal(update: Update, context: ContextTypes.DEFAULT_TYPE):
 from domain.calories import calculate_bmr, calculate_tdee, calculate_calorie_range
 
 async def show_calorie_corridor(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user = update.message.from_user
+    user = update.effective_user
     goal = update.message.text
+
+    # гарантируем, что запись пользователя существует
+    if user.id not in users_data:
+        users_data[user.id] = {}
+
     users_data[user.id]["goal"] = goal
     d = users_data[user.id]
+
     bmr = calculate_bmr(d["weight"], d["height"], d["age"], d["gender"])
     tdee = calculate_tdee(bmr, d["activity"])
     lower, upper = calculate_calorie_range(tdee, goal)
+
     users_data[user.id].update({
-        "bmr": bmr, "tdee": tdee,
+        "bmr": bmr,
+        "tdee": tdee,
         "calorie_lower": round(lower),
         "calorie_upper": round(upper),
-        "meals": [], "weights": [],
+        "meals": [],
+        "weights": [],
     })
+
     await update.message.reply_text(
-        f"Ваш коридор калорий на сегодня: {round(lower)} - {round(upper)} ккал.\n"
-        "Теперь можете вносить приёмы пищи в свободной форме — например: «два варёных яйца и яблоко».\n"
+        f"Ваш коридор калорий на сегодня: {round(lower)} – {round(upper)} ккал.\n\n"
+        "Теперь можете вносить приёмы пищи в свободной форме — например:\n"
+        "«9:00 два варёных яйца и яблоко».\n\n"
         "Я сам посчитаю КБЖУ через ChatGPT и поставлю напоминания."
     )
+
     save_user_data(user.id, users_data[user.id])
+
+    # переводим в основной режим
     return BotState.MONITORING

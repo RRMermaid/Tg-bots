@@ -12,6 +12,5 @@ class BotState(IntEnum):
     ASK_ACTIVITY = 9
     ASK_GOAL = 10
     RECORD_MEAL = 11
-    MONITORING = 12
+    MONITORING = 12   # 👈 основной режим после анкеты
     ASK_LOCAL_TIME = 99
-    
