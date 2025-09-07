@@ -31,7 +31,7 @@ async def morning_weight_request_user(context: ContextTypes.DEFAULT_TYPE):
                 model="gpt-4o-mini",
                 messages=[
                     {"role": "system", "content": "Ты заботливый ассистент. Придумай уникальное приветствие."},
-                    {"role": "user", "content": f"Сгенерируй доброе утреннее приветствие для пользователя по имени {name}. Пол: {gender}. Приветствие должно быть тёплым, поддерживающим и всегда разным."}
+                    {"role": "user", "content": f"Сгенерируй доброе утреннее приветствие для пользователя по имени {name}. Пол: {gender}. Приветствие должно быть тёплым, поддерживающим и всегда разным и уточни вес"}
                 ],
                 temperature=0.9,
                 max_tokens=80,
