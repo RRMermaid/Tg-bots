@@ -5,6 +5,9 @@ from datetime import date
 from datetime import timedelta
 from typing import Dict, Any
 from datetime import datetime, date
+from dotenv import load_dotenv
+load_dotenv()
+
 
 # Берём готовую DSN-строку и доверяем psycopg2 разбор параметров (sslmode, таймауты и т.д.)
 DATABASE_URL = os.getenv("DATABASE_URL")
