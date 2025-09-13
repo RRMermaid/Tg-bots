@@ -78,7 +78,16 @@ async def handle_evening_hour(update: Update, context: ContextTypes.DEFAULT_TYPE
         await update.message.reply_text("Выбери из кнопок, пожалуйста (формат HH:00).")
         return BotState.ASK_EVENING_HOUR
     users_data.setdefault(user.id, {})["evening_hour"] = int(m.group(1))
-    schedule_user_jobs(context.application, user.id)
+    
+    # Добавлена проверка перед вызовом schedule_user_jobs
+    if context.application and context.application.job_queue:
+        schedule_user_jobs(context.application, user.id)
+    else:
+        # Логирование для отладки
+        print(f"Warning: Cannot schedule jobs for user {user.id} - Application or JobQueue is None")
+        print(f"Application: {context.application}")
+        print(f"JobQueue: {context.application.job_queue if context.application else None}")
+    
     await update.message.reply_text("Отлично! Теперь давай познакомимся. Как тебя зовут?", reply_markup=ReplyKeyboardRemove())
     return BotState.ASK_NAME
 

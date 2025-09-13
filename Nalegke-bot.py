@@ -17,6 +17,10 @@ from handlers.analyze import analyze_day_command
 from states import BotState
 from logging_config import setup_logging
 
+from db import create_tables
+create_tables()
+print("Таблицы созданы/проверены")
+
 # 🆕 импортируем кэш и загрузку всех пользователей
 from services.storage import users_data
 from db import load_all_users
