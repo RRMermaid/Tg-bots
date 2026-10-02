@@ -1,0 +1,49 @@
+-- Additive migration: existing users, weights and meal rows are preserved.
+CREATE TABLE IF NOT EXISTS users (
+ id BIGINT PRIMARY KEY, name TEXT, phone TEXT, tz_offset INT DEFAULT 0,
+ age INT, gender TEXT, weight DOUBLE PRECISION, height INT, activity INT, goal TEXT
+);
+CREATE TABLE IF NOT EXISTS weights (
+ user_id BIGINT REFERENCES users(id), date DATE NOT NULL,
+ weight DOUBLE PRECISION NOT NULL, PRIMARY KEY(user_id,date)
+);
+CREATE TABLE IF NOT EXISTS meals (
+ id SERIAL PRIMARY KEY, user_id BIGINT REFERENCES users(id), time TIMESTAMPTZ NOT NULL,
+ calories INT, protein DOUBLE PRECISION, fat DOUBLE PRECISION, carbs DOUBLE PRECISION,
+ raw TEXT, meal_kind TEXT, portion DOUBLE PRECISION DEFAULT 1.0, oil_extra INT DEFAULT 0
+);
+CREATE TABLE IF NOT EXISTS notifications (
+ id SERIAL PRIMARY KEY, user_id BIGINT REFERENCES users(id),
+ kind TEXT NOT NULL, sent_at TIMESTAMPTZ DEFAULT now()
+);
+ALTER TABLE users ADD COLUMN IF NOT EXISTS timezone TEXT;
+ALTER TABLE users ADD COLUMN IF NOT EXISTS morning_time TEXT NOT NULL DEFAULT '08:00';
+ALTER TABLE users ADD COLUMN IF NOT EXISTS evening_time TEXT NOT NULL DEFAULT '21:00';
+ALTER TABLE users ADD COLUMN IF NOT EXISTS interval_hours INT NOT NULL DEFAULT 4;
+ALTER TABLE users ADD COLUMN IF NOT EXISTS reminders_enabled BOOLEAN NOT NULL DEFAULT TRUE;
+ALTER TABLE users ADD COLUMN IF NOT EXISTS profile_complete BOOLEAN NOT NULL DEFAULT FALSE;
+ALTER TABLE users ADD COLUMN IF NOT EXISTS flow_step TEXT;
+UPDATE users SET profile_complete = TRUE
+ WHERE goal IS NOT NULL AND age IS NOT NULL AND weight IS NOT NULL
+ AND height IS NOT NULL AND activity IS NOT NULL AND gender IS NOT NULL;
+ALTER TABLE meals ADD COLUMN IF NOT EXISTS items JSONB NOT NULL DEFAULT '[]';
+ALTER TABLE meals ADD COLUMN IF NOT EXISTS estimated BOOLEAN NOT NULL DEFAULT TRUE;
+ALTER TABLE meals ADD COLUMN IF NOT EXISTS source_key TEXT;
+CREATE UNIQUE INDEX IF NOT EXISTS meals_user_source ON meals(user_id,source_key);
+CREATE INDEX IF NOT EXISTS idx_meals_user_time ON meals(user_id,time);
+CREATE TABLE IF NOT EXISTS pending_meals (
+ id BIGSERIAL PRIMARY KEY, user_id BIGINT NOT NULL REFERENCES users(id),
+ source_key TEXT NOT NULL, payload JSONB NOT NULL,
+ state TEXT NOT NULL DEFAULT 'pending', created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+ UNIQUE(user_id,source_key)
+);
+CREATE TABLE IF NOT EXISTS water_entries (
+ id BIGSERIAL PRIMARY KEY, user_id BIGINT NOT NULL REFERENCES users(id),
+ time TIMESTAMPTZ NOT NULL, ml INT NOT NULL CHECK(ml > 0),
+ source_key TEXT NOT NULL, UNIQUE(user_id,source_key)
+);
+CREATE TABLE IF NOT EXISTS notification_claims (
+ user_id BIGINT NOT NULL REFERENCES users(id), kind TEXT NOT NULL, dedupe_key TEXT NOT NULL,
+ status TEXT NOT NULL DEFAULT 'claimed', claimed_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+ PRIMARY KEY(user_id,kind,dedupe_key)
+);

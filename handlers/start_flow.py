@@ -1,182 +1,118 @@
-import re
-from datetime import datetime, timedelta
-from telegram import Update, ReplyKeyboardRemove, Contact
-from telegram.ext import ContextTypes
-from keyboards import contact_kb, hour_kb, gender_kb, activity_kb, goal_kb
+"""Resumable onboarding stored in SQL; no ConversationHandler state in RAM."""
+import math
+from telegram import ReplyKeyboardRemove
+import db
+from domain.tz import now_local, parse_tz, timezone_name
+from domain.calories import calculate_bmr, calculate_tdee, calculate_calorie_range
+from keyboards import gender_kb, activity_kb, goal_kb
+from services.storage import query
 from states import BotState
 from texts import HELLO, ASK_LOCAL_TIME
-from services.storage import users_data
-from domain.tz import parse_tz
-from services.scheduler import schedule_user_jobs
-from db import save_user_data, load_user_data
 
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user = update.message.from_user
-    data = load_user_data(user.id)
-    if data:
-        users_data[user.id] = data
-    else:
-        users_data.setdefault(user.id, {})
-    await update.message.reply_text(HELLO, reply_markup=contact_kb)
-    return BotState.ASK_CONTACT
+QUESTIONS = {
+    BotState.TIMEZONE:ASK_LOCAL_TIME, BotState.NAME:"Как тебя зовут?",
+    BotState.GENDER:"Укажи пол для расчётной формулы.",
+    BotState.AGE:"Сколько тебе лет? Бот рассчитан на взрослых (18+).",
+    BotState.WEIGHT:"Какой сейчас вес в килограммах? Например, 80,2.",
+    BotState.HEIGHT:"Какой рост в сантиметрах?",
+    BotState.ACTIVITY:"Выбери активность: 1 — преимущественно сидячая, 2 — невысокая, "
+                      "3 — средняя, 4 — высокая, 5 — очень высокая.",
+    BotState.GOAL:"Какая цель тебе сейчас подходит?",
+}
 
-async def handle_contact_or_skip(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user = update.effective_user
-    d = users_data.setdefault(user.id, {})
-    if update.message and update.message.text and update.message.text.strip().lower() == "пропустить":
-        pass
-    elif update.message and isinstance(update.message.contact, Contact):
-        d["phone"] = update.message.contact.phone_number
-    # новый вопрос вместо ASK_LOCAL_TIME
-    from texts import ASK_LOCAL_TIME
-    await update.message.reply_text(ASK_LOCAL_TIME, reply_markup=ReplyKeyboardRemove())
-    return BotState.ASK_LOCAL_TIME
+def numeric(text, minimum, maximum, integer=False):
+    try:
+        value = float(text.replace(",","."))
+    except ValueError:
+        raise ValueError("Введите число.") from None
+    if not math.isfinite(value) or not minimum <= value <= maximum or (integer and value != int(value)):
+        raise ValueError("Значение вне допустимого диапазона.")
+    return int(value) if integer else value
 
+async def ask(message, step):
+    kb = {BotState.GENDER:gender_kb,BotState.ACTIVITY:activity_kb,BotState.GOAL:goal_kb}
+    await message.reply_text(QUESTIONS[step],reply_markup=kb.get(step,ReplyKeyboardRemove()))
 
-async def handle_local_time(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Пользователь ввёл локальное время (HH:MM), вычисляем смещение относительно сервера."""
-    user = update.effective_user
+async def set_step(user_id, message, step, fields=None):
+    await query(db.save_user_data,user_id,{**(fields or {}),"flow_step":step})
+    await ask(message,step)
+
+async def start(update, context):
+    profile = await query(db.ensure_user,update.effective_user.id)
+    if profile["profile_complete"] and profile.get("timezone"):
+        await query(db.save_user_data,profile["id"],{"flow_step":None})
+        await update.message.reply_text(
+            "С возвращением 🌿 Дневник и настройки сохранены. Пиши еду обычными словами "
+            "или посмотри /help.",reply_markup=ReplyKeyboardRemove())
+        return
+    await update.message.reply_text(HELLO)
+    step = profile.get("flow_step")
+    if step not in QUESTIONS:
+        step = BotState.TIMEZONE if not profile.get("timezone") else BotState.NAME
+    await set_step(profile["id"],update.message,step)
+
+async def edit_profile(update, context):
+    profile = await query(db.ensure_user,update.effective_user.id)
+    await set_step(profile["id"],update.message,
+                   BotState.NAME if profile.get("timezone") else BotState.TIMEZONE,
+                   {"profile_complete":False})
+
+async def change_timezone(update, context):
+    await query(db.ensure_user,update.effective_user.id)
+    await set_step(update.effective_user.id,update.message,BotState.TIMEZONE)
+
+async def handle_flow(update, context, profile):
+    step = profile.get("flow_step")
+    if not step:
+        return False
     text = (update.message.text or "").strip()
-
+    uid = profile["id"]
     try:
-        hh, mm = map(int, text.split(":"))
-        now_server = datetime.now().replace(second=0, microsecond=0)
-        user_time = now_server.replace(hour=hh, minute=mm)
-
-        # разница в минутах (может быть отрицательной)
-        offset_minutes = int((user_time - now_server).total_seconds() / 60)
-
-        users_data.setdefault(user.id, {})["tz_offset"] = offset_minutes
-
-        # сохраним в БД (если добавлено поле tz_offset)
-        save_user_data(user.id, users_data[user.id])
-
-        await update.message.reply_text(
-            "Принято! Во сколько удобно присылать утренний запрос веса? Выбери час:",
-            reply_markup=hour_kb(6, 11)
-        )
-        return BotState.ASK_MORNING_HOUR
-
-    except Exception:
-        await update.message.reply_text("Пожалуйста, укажи время в формате HH:MM (например, 09:30).")
-        return BotState.ASK_LOCAL_TIME
-
-async def handle_morning_hour(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user = update.effective_user
-    m = re.fullmatch(r'(\d{2}):00', (update.message.text or "").strip())
-    if not m:
-        await update.message.reply_text("Выбери из кнопок, пожалуйста (формат HH:00).")
-        return BotState.ASK_MORNING_HOUR
-    users_data.setdefault(user.id, {})["morning_hour"] = int(m.group(1))
-    await update.message.reply_text("А во сколько присылать вечерний итог дня?", reply_markup=hour_kb(19, 23))
-    return BotState.ASK_EVENING_HOUR
-
-async def handle_evening_hour(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user = update.effective_user
-    m = re.fullmatch(r'(\d{2}):00', (update.message.text or "").strip())
-    if not m:
-        await update.message.reply_text("Выбери из кнопок, пожалуйста (формат HH:00).")
-        return BotState.ASK_EVENING_HOUR
-    users_data.setdefault(user.id, {})["evening_hour"] = int(m.group(1))
-    schedule_user_jobs(context.application, user.id)
-    await update.message.reply_text("Отлично! Теперь давай познакомимся. Как тебя зовут?", reply_markup=ReplyKeyboardRemove())
-    return BotState.ASK_NAME
-
-async def ask_gender(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user = update.message.from_user
-    users_data[user.id] = {"name": update.message.text}
-    await update.message.reply_text(f"Приятно познакомиться, {update.message.text}! Укажи, пожалуйста, свой пол.", reply_markup=gender_kb)
-    return BotState.ASK_GENDER
-
-async def ask_age(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user = update.message.from_user
-    users_data[user.id]["gender"] = update.message.text
-    await update.message.reply_text("Сколько тебе лет? Пожалуйста, введи число (например, 30).")
-    return BotState.ASK_AGE
-
-async def ask_weight(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user = update.message.from_user
-    try:
-        age = int(update.message.text)
-        users_data[user.id]["age"] = age
-        await update.message.reply_text("Каков твой текущий вес в килограммах? (например, 70)")
-        return BotState.ASK_WEIGHT
-    except ValueError:
-        await update.message.reply_text("Пожалуйста, введи только число для возраста.")
-        return BotState.ASK_AGE
-
-async def ask_height(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user = update.message.from_user
-    try:
-        weight = float(update.message.text.replace(",", "."))
-        users_data[user.id]["weight"] = weight
-        await update.message.reply_text("Каков твой рост в сантиметрах? (например, 175)")
-        return BotState.ASK_HEIGHT
-    except ValueError:
-        await update.message.reply_text("Пожалуйста, введи число для веса.")
-        return BotState.ASK_WEIGHT
-
-async def ask_activity(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user = update.message.from_user
-    try:
-        height = int(update.message.text)
-        users_data[user.id]["height"] = height
-        await update.message.reply_text(
-            "Оцени свою физическую активность по пятибалльной шкале:\n"
-            "1 - минимальная (сидячий образ жизни)\n"
-            "5 - очень высокая (ежедневные интенсивные тренировки)",
-            reply_markup=activity_kb,
-        )
-        return BotState.ASK_ACTIVITY
-    except ValueError:
-        await update.message.reply_text("Пожалуйста, введи число для роста.")
-        return BotState.ASK_HEIGHT
-
-async def ask_goal(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user = update.message.from_user
-    try:
-        activity = int(update.message.text)
-        users_data[user.id]["activity"] = activity
-        await update.message.reply_text("Какова твоя цель?\nПохудеть, удержать вес или набрать массу?", reply_markup=goal_kb)
-        return BotState.ASK_GOAL
-    except ValueError:
-        await update.message.reply_text("Пожалуйста, выбери число от 1 до 5 на клавиатуре.")
-        return BotState.ASK_ACTIVITY
-
-from domain.calories import calculate_bmr, calculate_tdee, calculate_calorie_range
-
-async def show_calorie_corridor(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user = update.effective_user
-    goal = update.message.text
-
-    # гарантируем, что запись пользователя существует
-    if user.id not in users_data:
-        users_data[user.id] = {}
-
-    users_data[user.id]["goal"] = goal
-    d = users_data[user.id]
-
-    bmr = calculate_bmr(d["weight"], d["height"], d["age"], d["gender"])
-    tdee = calculate_tdee(bmr, d["activity"])
-    lower, upper = calculate_calorie_range(tdee, goal)
-
-    users_data[user.id].update({
-        "bmr": bmr,
-        "tdee": tdee,
-        "calorie_lower": round(lower),
-        "calorie_upper": round(upper),
-        "meals": [],
-        "weights": [],
-    })
-
-    await update.message.reply_text(
-        f"Ваш коридор калорий на сегодня: {round(lower)} – {round(upper)} ккал.\n\n"
-        "Теперь можете вносить приёмы пищи в свободной форме — например:\n"
-        "«9:00 два варёных яйца и яблоко».\n\n"
-        "Я сам посчитаю КБЖУ через ChatGPT и поставлю напоминания."
-    )
-
-    save_user_data(user.id, users_data[user.id])
-
-    # переводим в основной режим
-    return BotState.MONITORING
+        if step == BotState.TIMEZONE:
+            tz = parse_tz(text)
+            if tz is None:
+                raise ValueError("Не удалось распознать город или пояс. Например, Тюмень или UTC+5.")
+            fields = {"timezone":timezone_name(tz)}
+            if profile["profile_complete"]:
+                await query(db.save_user_data,uid,{**fields,"flow_step":None})
+                await update.message.reply_text("Часовой пояс сохранён: "+fields["timezone"],
+                                                 reply_markup=ReplyKeyboardRemove())
+            else:
+                await set_step(uid,update.message,BotState.NAME,fields)
+        elif step == BotState.NAME:
+            if not 1 <= len(text) <= 80:
+                raise ValueError("Напиши имя длиной до 80 символов.")
+            await set_step(uid,update.message,BotState.GENDER,{"name":text})
+        elif step == BotState.GENDER:
+            if text not in ("Мужской","Женский"):
+                raise ValueError("Выбери вариант на клавиатуре.")
+            await set_step(uid,update.message,BotState.AGE,{"gender":text})
+        elif step == BotState.AGE:
+            await set_step(uid,update.message,BotState.WEIGHT,{"age":numeric(text,18,100,True)})
+        elif step == BotState.WEIGHT:
+            await set_step(uid,update.message,BotState.HEIGHT,{"weight":numeric(text,20,400)})
+        elif step == BotState.HEIGHT:
+            await set_step(uid,update.message,BotState.ACTIVITY,{"height":numeric(text,100,250,True)})
+        elif step == BotState.ACTIVITY:
+            await set_step(uid,update.message,BotState.GOAL,{"activity":numeric(text,1,5,True)})
+        elif step == BotState.GOAL:
+            if text not in ("Похудеть","Удержать вес","Набрать массу"):
+                raise ValueError("Выбери цель на клавиатуре.")
+            await query(db.save_user_data,uid,{"goal":text,"profile_complete":True,"flow_step":None})
+            await query(db.save_weight,uid,now_local(profile).date(),profile["weight"])
+            bmr = calculate_bmr(profile["weight"],profile["height"],profile["age"],profile["gender"])
+            low, high = calculate_calorie_range(calculate_tdee(bmr,profile["activity"]),text)
+            await update.message.reply_text(
+                f"Анкета сохранена 🌿 Приблизительный ориентир: {round(low)}–{round(high)} ккал. "
+                "Это оценка, а не назначение и не экзамен.\n"
+                "Пиши еду текстом; я предложу оценку для подтверждения.\n"
+                f"Утро: {profile['morning_time']}, вечер: {profile['evening_time']}, "
+                f"интервал заботы о себе: {profile['interval_hours']} ч. Настройки: /reminders.",
+                reply_markup=ReplyKeyboardRemove())
+        else:
+            await query(db.save_user_data,uid,{"flow_step":None})
+            await update.message.reply_text("Продолжим с /start.")
+    except ValueError as exc:
+        await update.message.reply_text(str(exc))
+        await ask(update.message,step)
+    return True

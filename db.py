@@ -1,306 +1,176 @@
+"""Small synchronous repository, called off the asyncio loop via storage.query."""
+import hashlib
 import os
+from contextlib import contextmanager
+from datetime import datetime
+from pathlib import Path
+
 import psycopg2
-from datetime import date
-from datetime import timedelta
-from typing import Dict, Any
-from datetime import datetime, date
+from psycopg2.extras import Json, RealDictCursor
+import config
 
-# Берём готовую DSN-строку и доверяем psycopg2 разбор параметров (sslmode, таймауты и т.д.)
-DATABASE_URL = os.getenv("DATABASE_URL")
-
-
+@contextmanager
 def get_connection():
-    if not DATABASE_URL:
-        raise RuntimeError("DATABASE_URL is not set")
-    conn = psycopg2.connect(DATABASE_URL)
-    conn.set_client_encoding("UTF8")
-    return conn
-
+    dsn = os.getenv("DATABASE_URL") or config.DATABASE_URL
+    params = {"connect_timeout": 10, "options": "-c timezone=UTC -c statement_timeout=15000"}
+    if not dsn:
+        if not os.getenv("PGHOST"):
+            raise RuntimeError("Set DATABASE_URL or PGHOST/PGDATABASE/PGUSER/PGPASSWORD")
+        params.update({k: os.getenv(v) for k, v in (
+            ("host","PGHOST"),("port","PGPORT"),("dbname","PGDATABASE"),
+            ("user","PGUSER"),("password","PGPASSWORD")) if os.getenv(v)})
+    conn = psycopg2.connect(dsn, **params) if dsn else psycopg2.connect(**params)
+    try:
+        with conn:
+            yield conn
+    finally:
+        conn.close()
 
 def create_tables():
-    """Создаёт таблицы, если их ещё нет. time хранится как TIMESTAMPTZ."""
     with get_connection() as conn, conn.cursor() as cur:
-        cur.execute(
-            """
-            CREATE TABLE IF NOT EXISTS users (
-                id       BIGINT PRIMARY KEY,
-                name     TEXT,
-                phone    TEXT,
-                tz_offset INT DEFAULT 0,
-                age      INT,
-                gender   TEXT,
-                weight   FLOAT,
-                height   INT,
-                activity INT,
-                goal     TEXT
-            );
-            """
-        )
-        cur.execute(
-            """
-            CREATE TABLE IF NOT EXISTS weights (
-                user_id BIGINT REFERENCES users(id),
-                date    DATE NOT NULL,
-                weight  FLOAT NOT NULL,
-                PRIMARY KEY(user_id, date)
-            );
-            """
-        )
-        cur.execute(
-            """
-            CREATE TABLE IF NOT EXISTS meals (
-                id        SERIAL PRIMARY KEY,
-                user_id   BIGINT REFERENCES users(id),
-                time      TIMESTAMPTZ NOT NULL,
-                calories  INT,
-                protein   FLOAT,
-                fat       FLOAT,
-                carbs     FLOAT,
-                raw       TEXT,
-                meal_kind TEXT,
-                portion   FLOAT DEFAULT 1.0,
-                oil_extra INT   DEFAULT 0
-            );
-            """
-        )
-        # Полезный индекс для частых выборок по пользователю и дате/времени
-        cur.execute(
-            """
-            CREATE INDEX IF NOT EXISTS idx_meals_user_time
-            ON meals (user_id, time);
-            """
-        )
-        cur.execute(
-    """
-    CREATE TABLE IF NOT EXISTS notifications (
-        id       SERIAL PRIMARY KEY,
-        user_id  BIGINT REFERENCES users(id),
-        kind     TEXT NOT NULL,  -- 'morning' или 'evening'
-        sent_at  TIMESTAMPTZ DEFAULT now()
-    );
-    """
-)
+        cur.execute("SELECT pg_advisory_xact_lock(728191120)")
+        cur.execute("CREATE TABLE IF NOT EXISTS schema_migrations (name TEXT PRIMARY KEY, applied_at TIMESTAMPTZ DEFAULT now())")
+        for path in sorted((Path(__file__).parent/"migrations").glob("*.sql")):
+            cur.execute("SELECT 1 FROM schema_migrations WHERE name=%s", (path.name,))
+            if cur.fetchone():
+                continue
+            cur.execute(path.read_text(encoding="utf-8"))
+            cur.execute("INSERT INTO schema_migrations(name) VALUES (%s)", (path.name,))
 
-def save_user_data(user_id: int, data: Dict[str, Any]):
+def ensure_user(user_id):
     with get_connection() as conn, conn.cursor() as cur:
-        cur.execute(
-            """
-            INSERT INTO users (id, name, phone, tz_offset, age, gender, weight, height, activity, goal)
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-            ON CONFLICT (id) DO UPDATE SET
-                name     = EXCLUDED.name,
-                phone    = EXCLUDED.phone,
-                tz_offset= EXCLUDED.tz_offset,
-                age      = EXCLUDED.age,
-                gender   = EXCLUDED.gender,
-                weight   = EXCLUDED.weight,
-                height   = EXCLUDED.height,
-                activity = EXCLUDED.activity,
-                goal     = EXCLUDED.goal;
-            """,
-            (
-                user_id,
-                data.get("name"),
-                data.get("phone"),
-                data.get("tz_offset", 0),
-                data.get("age"),
-                data.get("gender"),
-                data.get("weight"),
-                data.get("height"),
-                data.get("activity"),
-                data.get("goal"),
-            ),
-        )
+        cur.execute("INSERT INTO users(id) VALUES (%s) ON CONFLICT DO NOTHING", (user_id,))
+    return load_user_data(user_id)
 
-def load_user_data(user_id: int) -> Dict[str, Any]:
-    with get_connection() as conn, conn.cursor() as cur:
-        cur.execute(
-            """
-            SELECT id, name, phone, tz_offset, age, gender, weight, height, activity, goal
-            FROM users
-            WHERE id = %s
-            """,
-            (user_id,),
-        )
+def load_user_data(user_id):
+    with get_connection() as conn, conn.cursor(cursor_factory=RealDictCursor) as cur:
+        cur.execute("SELECT * FROM users WHERE id=%s", (user_id,))
         row = cur.fetchone()
-    if row is None:
-        return {}
-    keys = ("id", "name", "phone", "tz_offset", "age", "gender", "weight", "height", "activity", "goal")
-    return dict(zip(keys, row))
+    return dict(row) if row else {}
 
-def save_weight(user_id: int, date_obj, weight: float):
+PROFILE_FIELDS = frozenset(("name","phone","timezone","tz_offset","age","gender","weight",
+    "height","activity","goal","morning_time","evening_time","interval_hours",
+    "reminders_enabled","profile_complete","flow_step"))
+
+def save_user_data(user_id, data):
+    keys = [key for key in data if key in PROFILE_FIELDS]
     with get_connection() as conn, conn.cursor() as cur:
-        cur.execute(
-            """
-            INSERT INTO weights (user_id, date, weight)
-            VALUES (%s, %s, %s)
-            ON CONFLICT (user_id, date) DO UPDATE SET weight = EXCLUDED.weight
-            """,
-            (user_id, date_obj, weight),
-        )
+        cur.execute("INSERT INTO users(id) VALUES (%s) ON CONFLICT DO NOTHING", (user_id,))
+        if keys:
+            # Names are exclusively from the fixed allowlist above.
+            assignments = ", ".join(f"{key}=%s" for key in keys)
+            cur.execute(f"UPDATE users SET {assignments} WHERE id=%s",
+                        tuple(data[key] for key in keys)+(user_id,))
 
-
-def save_meal(
-    user_id: int,
-    time_obj,
-    calories: int,
-    protein,
-    fat,
-    carbs,
-    raw: str,
-    meal_kind: str,
-    portion: float = 1.0,
-    oil_extra: int = 0,
-):
+def save_weight(user_id, day, weight):
     with get_connection() as conn, conn.cursor() as cur:
-        cur.execute(
-            """
-            INSERT INTO meals (user_id, time, calories, protein, fat, carbs, raw, meal_kind, portion, oil_extra)
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-            """,
-            (
-                user_id,
-                time_obj,  # aware datetime (tzinfo) разрешён TIMESTAMPTZ
-                calories,
-                protein,
-                fat,
-                carbs,
-                raw,
-                meal_kind,
-                portion,
-                oil_extra,
-            ),
-        )
-        
-def save_notification(user_id: int, kind: str):
+        cur.execute("INSERT INTO weights(user_id,date,weight) VALUES (%s,%s,%s) "
+                    "ON CONFLICT(user_id,date) DO UPDATE SET weight=EXCLUDED.weight",
+                    (user_id,day,weight))
+        cur.execute("UPDATE users SET weight=%s WHERE id=%s", (weight,user_id))
+
+def get_weights(user_id, start, end):
     with get_connection() as conn, conn.cursor() as cur:
-        cur.execute(
-            "INSERT INTO notifications (user_id, kind) VALUES (%s, %s)",
-            (user_id, kind),
-        )
+        cur.execute("SELECT date,weight FROM weights WHERE user_id=%s AND date BETWEEN %s AND %s ORDER BY date",
+                    (user_id,start,end))
+        return cur.fetchall()
 
-def analyze_user_day(user_id: int, date_obj):
-    """Простой совет по режиму за указанный день."""
+def get_draft(user_id, draft_id=None, source_key=None):
+    with get_connection() as conn, conn.cursor(cursor_factory=RealDictCursor) as cur:
+        if draft_id is not None:
+            cur.execute("SELECT * FROM pending_meals WHERE user_id=%s AND id=%s", (user_id,draft_id))
+        else:
+            cur.execute("SELECT * FROM pending_meals WHERE user_id=%s AND source_key=%s", (user_id,source_key))
+        row = cur.fetchone()
+    return dict(row) if row else None
+
+def save_draft(user_id, source_key, payload):
     with get_connection() as conn, conn.cursor() as cur:
-        # Приёмы пищи за день
-        cur.execute(
-            """
-            SELECT time, raw
-            FROM meals
-            WHERE user_id = %s AND time::date = %s
-            ORDER BY time
-            """,
-            (user_id, date_obj),
-        )
-        meals = cur.fetchall()
+        cur.execute("INSERT INTO pending_meals(user_id,source_key,payload) VALUES (%s,%s,%s) "
+                    "ON CONFLICT(user_id,source_key) DO NOTHING",
+                    (user_id,source_key,Json(payload)))
+    return get_draft(user_id,source_key=source_key)
 
-        # Промежутки между приёмами
-        time_gaps = []
-        for i in range(1, len(meals)):
-            gap = (meals[i][0] - meals[i - 1][0]).total_seconds() / 3600.0
-            time_gaps.append(gap)
-
-        long_gaps = [g for g in time_gaps if g > 5]
-        advice = ""
-        if long_gaps:
-            advice += "Попробуйте питаться чаще, чтобы уровень энергии был стабильным.\n"
-
-        # Очень грубая эвристика по 'быстрой еде'
-        fast_food_keywords = ["фастфуд", "пицца", "бургеры", "кока-кола"]
-        bad_meals = [m for m in meals if m[1] and any(w in m[1].lower() for w in fast_food_keywords)]
-
-        # Сравнение веса (сегодня vs вчера)
-        cur.execute("SELECT weight FROM weights WHERE user_id = %s AND date = %s", (user_id, date_obj))
-        weight_today = cur.fetchone()
-        cur.execute(
-            "SELECT weight FROM weights WHERE user_id = %s AND date = %s",
-            (user_id, date_obj - timedelta(days=1)),
-        )
-        weight_yesterday = cur.fetchone()
-
-    if weight_today and weight_yesterday and weight_today[0] > weight_yesterday[0] and bad_meals:
-        advice += (
-            "Вчера вы употребляли продукты, которые могли способствовать набору веса. Будьте внимательны.\n"
-        )
-
-    return advice
-
-def load_all_users() -> dict[int, dict]:
-    """Загружает всех пользователей из БД в словарь {user_id: данные}"""
+def cancel_draft(user_id, draft_id):
     with get_connection() as conn, conn.cursor() as cur:
-        cur.execute(
-            """
-            SELECT id, name, phone, tz_offset, age, gender, weight, height, activity, goal
-            FROM users
-            """
-        )
-        rows = cur.fetchall()
-    keys = ("id", "name", "phone", "tz_offset", "age", "gender", "weight", "height", "activity", "goal")
-    return {row[0]: dict(zip(keys, row)) for row in rows}
+        cur.execute("UPDATE pending_meals SET state='cancelled' WHERE id=%s AND user_id=%s AND state='pending'",
+                    (draft_id,user_id))
+        return cur.rowcount == 1
 
-def load_meals_for_today(user_id: int) -> list[str]:
-    """Загружает все приёмы пищи пользователя за сегодня в виде списка строк."""
-    today = date.today()
+def confirm_draft(user_id, draft_id):
+    with get_connection() as conn, conn.cursor(cursor_factory=RealDictCursor) as cur:
+        cur.execute("SELECT * FROM pending_meals WHERE id=%s AND user_id=%s FOR UPDATE", (draft_id,user_id))
+        draft = cur.fetchone()
+        if not draft or draft["state"] != "pending":
+            return False
+        for i, meal in enumerate(draft["payload"]):
+            stamp = datetime.fromisoformat(meal["time"])
+            if stamp.tzinfo is None:
+                raise ValueError("Meal time must have a timezone")
+            if meal.get("water_ml"):
+                cur.execute("INSERT INTO water_entries(user_id,time,ml,source_key) VALUES (%s,%s,%s,%s) "
+                            "ON CONFLICT(user_id,source_key) DO NOTHING",
+                            (user_id,stamp,meal["water_ml"],f'{draft["source_key"]}:{i}'))
+                continue
+            cur.execute(
+                "INSERT INTO meals(user_id,time,calories,protein,fat,carbs,raw,meal_kind,items,estimated,source_key) "
+                "VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) ON CONFLICT(user_id,source_key) DO NOTHING",
+                (user_id,stamp,meal["calories"],meal.get("protein_g"),meal.get("fat_g"),
+                 meal.get("carbs_g"),meal["raw"],meal["meal_kind"],Json(meal["items"]),
+                 meal["estimated"],f'{draft["source_key"]}:{i}'))
+        cur.execute("UPDATE pending_meals SET state='confirmed' WHERE id=%s", (draft_id,))
+        return True
+
+def load_meals(user_id, start, end):
+    with get_connection() as conn, conn.cursor(cursor_factory=RealDictCursor) as cur:
+        cur.execute("SELECT * FROM meals WHERE user_id=%s AND time >= %s AND time < %s ORDER BY time,id",
+                    (user_id,start,end))
+        return [dict(row) for row in cur.fetchall()]
+
+def load_water(user_id, start, end):
     with get_connection() as conn, conn.cursor() as cur:
+        cur.execute("SELECT COALESCE(SUM(ml),0) FROM water_entries WHERE user_id=%s AND time >= %s AND time < %s",
+                    (user_id,start,end))
+        return cur.fetchone()[0]
+
+def reminder_users():
+    with get_connection() as conn, conn.cursor(cursor_factory=RealDictCursor) as cur:
         cur.execute(
-            """
-            SELECT time, raw
-            FROM meals
-            WHERE user_id = %s AND time::date = %s
-            ORDER BY time
-            """,
-            (user_id, today),
-        )
-        rows = cur.fetchall()
-    return [f"{r[0].strftime('%H:%M')} — {r[1]}" for r in rows] if rows else []
+            "SELECT u.*, m.id AS last_meal_id, m.time AS last_meal_time FROM users u "
+            "LEFT JOIN LATERAL (SELECT id,time FROM meals WHERE user_id=u.id ORDER BY time DESC,id DESC LIMIT 1) m ON TRUE "
+            "WHERE u.profile_complete AND u.timezone IS NOT NULL AND u.reminders_enabled")
+        return [dict(row) for row in cur.fetchall()]
 
-
-def get_weight_trend(user_id: int, days: int = 7) -> str:
-    """
-    Возвращает динамику веса за последние N дней.
-    Например: '+0.5 кг за 7 дней' или 'нет данных'.
-    """
+def claim_notification(user_id, kind, key):
     with get_connection() as conn, conn.cursor() as cur:
-        cur.execute(
-            """
-            SELECT date, weight
-            FROM weights
-            WHERE user_id = %s
-            ORDER BY date ASC
-            """,
-            (user_id,),
-        )
-        rows = cur.fetchall()
+        cur.execute("INSERT INTO notification_claims(user_id,kind,dedupe_key) VALUES (%s,%s,%s) "
+                    "ON CONFLICT DO NOTHING", (user_id,kind,key))
+        return cur.rowcount == 1
 
-    if not rows or len(rows) < 2:
-        return "нет данных"
-
-    # Берём точку N дней назад и последнюю
-    recent = [r for r in rows if (rows[-1][0] - r[0]).days <= days]
-    if len(recent) < 2:
-        return "нет данных"
-
-    start_w = recent[0][1]
-    end_w = recent[-1][1]
-    diff = round(end_w - start_w, 1)
-
-    if diff > 0:
-        return f"+{diff} кг за {days} дней"
-    elif diff < 0:
-        return f"{diff} кг за {days} дней"
-    return f"без изменений за {days} дней"
-
-def load_last_notifications(limit: int = 10):
-    """Возвращает последние N уведомлений."""
+def finish_notification(user_id, kind, key, success):
     with get_connection() as conn, conn.cursor() as cur:
-        cur.execute(
-            """
-            SELECT user_id, kind, sent_at
-            FROM notifications
-            ORDER BY sent_at DESC
-            LIMIT %s
-            """,
-            (limit,),
-        )
-        rows = cur.fetchall()
-    return rows
+        cur.execute("UPDATE notification_claims SET status=%s WHERE user_id=%s AND kind=%s AND dedupe_key=%s",
+                    ("sent" if success else "failed",user_id,kind,key))
+        if success:
+            cur.execute("INSERT INTO notifications(user_id,kind) VALUES (%s,%s)", (user_id,kind))
+
+def load_last_notifications(user_id, limit=10):
+    with get_connection() as conn, conn.cursor() as cur:
+        cur.execute("SELECT kind,sent_at FROM notifications WHERE user_id=%s ORDER BY sent_at DESC LIMIT %s",
+                    (user_id,limit))
+        return cur.fetchall()
+
+@contextmanager
+def single_instance(token):
+    """Hold an advisory lock for this Telegram bot for the lifetime of the process."""
+    key = int.from_bytes(hashlib.sha256(token.encode()).digest()[:8], "big", signed=True)
+    with get_connection() as conn, conn.cursor() as cur:
+        cur.execute("SELECT pg_try_advisory_lock(%s)", (key,))
+        if not cur.fetchone()[0]:
+            raise RuntimeError("Another Nalegke instance already runs against this database")
+        conn.commit()
+        yield
+
+if __name__ == "__main__":
+    create_tables()
+    print("Database migrations applied.")

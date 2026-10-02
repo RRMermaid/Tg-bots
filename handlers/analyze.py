@@ -1,19 +1,11 @@
-from telegram import Update
-from telegram.ext import ContextTypes
-from db import load_meals_for_today, get_weight_trend
-from services.analysis_service import analyze_day
+import db
+from domain.tz import now_local
+from services.storage import query
+from services.analysis_service import daily_report, send_long
 
-async def analyze_day_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
-
-    meals = load_meals_for_today(user_id)
-    weight_trend = get_weight_trend(user_id) or "нет данных"
-
-    if not meals:
-        await update.message.reply_text("Сегодня ещё нет записанных приёмов пищи.")
+async def analyze_day_command(update, context):
+    profile = await query(db.load_user_data,update.effective_user.id)
+    if not profile.get("profile_complete") or not profile.get("timezone"):
+        await update.message.reply_text("Сначала настроим анкету и время: /start.")
         return
-
-    analysis = analyze_day(meals, weight_trend)
-    text = "Твой рацион за сегодня:\n- " + "\n- ".join(meals) + "\n\n" + analysis
-
-    await update.message.reply_text(text)
+    await send_long(update.message,await daily_report(profile["id"],profile,now_local(profile).date()))
