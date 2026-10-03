@@ -17,6 +17,7 @@ def get_client():
             proxy=config.OPENAI_PROXY_URL or None, trust_env=False,
             timeout=httpx.Timeout(30.0, connect=10.0))
         _client = AsyncOpenAI(api_key=config.OPENAI_API_KEY,
+                             base_url=config.OPENAI_BASE_URL or None,
                              http_client=transport, max_retries=1)
     return _client
 
