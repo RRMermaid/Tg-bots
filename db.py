@@ -279,8 +279,11 @@ def reminder_users(instant=None):
 def expired_trial_users(instant=None):
     instant = instant or datetime.now(timezone.utc)
     with get_connection() as conn, conn.cursor(cursor_factory=RealDictCursor) as cur:
-        cur.execute("SELECT * FROM users WHERE profile_complete AND trial_ends_at IS NOT NULL "
-                    "AND trial_ends_at<=%s", (instant,))
+        cur.execute(
+            "SELECT u.*, EXISTS (SELECT 1 FROM access_grants g WHERE g.user_id=u.id "
+            "AND g.starts_at<=%s AND (g.ends_at IS NULL OR g.ends_at>%s)) AS active_grant "
+            "FROM users u WHERE u.profile_complete AND u.trial_ends_at IS NOT NULL "
+            "AND u.trial_ends_at<=%s", (instant,instant,instant))
         return [dict(row) for row in cur.fetchall()]
 
 def claim_notification(user_id, kind, key):

@@ -127,9 +127,9 @@ async def test_pause_does_not_disable_diary(telegram_app,profile,database):
 async def test_ai_failure_does_not_create_fake_zero_meal(telegram_app,profile,database,monkeypatch):
     application,request = telegram_app
     monkeypatch.setattr(meals,"estimate_meal_nutrition",AsyncMock(return_value=None))
-    await application.process_update(text_update(application,"яйца"))
+    await application.process_update(text_update(application,"2 яйца"))
     assert database.get_draft(42,source_key="tg:42:1") is None
-    assert "не изменён" in request.sent[-1]
+    assert "не получилось рассчитать" in request.sent[-1]
 
 async def test_only_one_general_text_handler(telegram_app):
     from telegram.ext import MessageHandler

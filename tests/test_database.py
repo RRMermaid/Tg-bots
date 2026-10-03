@@ -97,6 +97,8 @@ def test_trial_and_future_access_grants(database,profile):
     assert not database.access_active(42,after)
     database.add_access_grant(42,"gift",starts_at=after,ends_at=after+timedelta(days=30))
     assert database.access_active(42,after+timedelta(days=1))
+    expired = database.expired_trial_users(after+timedelta(days=1))
+    assert len(expired) == 1 and expired[0]["active_grant"] is True
 
 def test_edit_replaces_instead_of_duplicating(database,profile,meal_payload):
     draft = database.save_draft(42,"tg:42:edit",meal_payload)

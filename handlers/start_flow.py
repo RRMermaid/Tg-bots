@@ -1,4 +1,5 @@
 """Durable, resumable onboarding stored in PostgreSQL."""
+from datetime import datetime, timezone
 import math
 from telegram import ReplyKeyboardRemove
 
@@ -96,7 +97,7 @@ async def start(update, context):
     profile = await ensure_profile(update)
     await notify_new_user(update,context,profile)
     if profile.get("profile_complete") and profile.get("onboarding_version") == config.ONBOARDING_VERSION:
-        if not await query(db.access_active,profile["id"],update.message.date):
+        if not await query(db.access_active,profile["id"],datetime.now(timezone.utc)):
             await update.message.reply_text(TRIAL_ENDED,reply_markup=ReplyKeyboardRemove())
             return
         await query(db.save_user_data,profile["id"],{"flow_step":None})
@@ -151,11 +152,12 @@ async def finish_onboarding(update, user_id):
         "goal_start_weight":profile["weight"],"milestones_reached":0,"profile_complete":True,
         "flow_step":None,"onboarding_version":config.ONBOARDING_VERSION})
     completed = await query(db.load_user_data,user_id)
-    local_day = update.message.date.astimezone(user_timezone(completed)).date()
+    instant = datetime.now(timezone.utc)
+    local_day = instant.astimezone(user_timezone(completed)).date()
     await query(db.save_weight,user_id,local_day,completed["weight"])
-    _,trial_ends = await query(db.activate_trial,user_id,update.message.date,config.TRIAL_MONTHS)
+    _,trial_ends = await query(db.activate_trial,user_id,instant,config.TRIAL_MONTHS)
     trial_text = (TRIAL_MESSAGE.format(date=trial_ends.astimezone(user_timezone(completed)).strftime("%d.%m.%Y"))
-                  if trial_ends > update.message.date else TRIAL_ENDED)
+                  if trial_ends > instant else TRIAL_ENDED)
     await update.message.reply_text(
         f"Анкета готова 🌿 Твой ориентировочный коридор: {low}–{high} ккал.\n\n"
         +goal_recommendation(completed)+"\n\n"+trial_text,reply_markup=main_menu_kb)

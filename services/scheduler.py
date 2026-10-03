@@ -6,7 +6,7 @@ import db
 from domain.tz import UTC, user_timezone, parse_clock
 from handlers.reminders import send_notification
 from services.storage import query
-from texts import TRIAL_ENDED
+from texts import TRIAL_ENDED, TRIAL_ENDED_ACCESS_CONTINUES
 
 logger = logging.getLogger(__name__)
 
@@ -47,18 +47,25 @@ async def send_trial_expirations(bot, instant):
         if await query(db.claim_notification,user["id"],"trial_ended_user",key):
             success = False
             try:
-                await bot.send_message(chat_id=user["id"],text=TRIAL_ENDED)
+                text = TRIAL_ENDED_ACCESS_CONTINUES if user["active_grant"] else TRIAL_ENDED
+                await bot.send_message(chat_id=user["id"],text=text)
                 success = True
+            except Exception as exc:
+                logger.warning("Trial end message failed for user %s: %s",user["id"],type(exc).__name__)
             finally:
                 await query(db.finish_notification,user["id"],"trial_ended_user",key,success)
         if config.ADMIN_ID and await query(db.claim_notification,user["id"],"trial_ended_admin",key):
             success = False
             try:
                 username = f"@{user['telegram_username']}" if user.get("telegram_username") else "без username"
+                access = "доступ уже продолжен" if user["active_grant"] else "для продолжения нужна подписка"
                 await bot.send_message(chat_id=config.ADMIN_ID,text=(
                     "Завершился тестовый период пользователя «Налегке»:\n"
-                    f"{user.get('name') or user.get('telegram_first_name') or 'Без имени'} · {username} · ID {user['id']}"))
+                    f"{user.get('name') or user.get('telegram_first_name') or 'Без имени'} · "
+                    f"{username} · ID {user['id']}\nСтатус: {access}."))
                 success = True
+            except Exception as exc:
+                logger.warning("Trial end admin message failed for user %s: %s",user["id"],type(exc).__name__)
             finally:
                 await query(db.finish_notification,user["id"],"trial_ended_admin",key,success)
 

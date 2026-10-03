@@ -1,4 +1,5 @@
 """Single entry point for the independent Nalegke bot."""
+from datetime import datetime, timezone
 import re
 import httpx
 from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, CallbackQueryHandler, filters
@@ -34,7 +35,7 @@ async def handle_text(update, context):
     if not profile.get("profile_complete"):
         await update.message.reply_text("Начнём со знакомства и анкеты: /start.")
         return
-    if not await query(db.access_active,profile["id"],update.message.date):
+    if not await query(db.access_active,profile["id"],datetime.now(timezone.utc)):
         await update.message.reply_text(TRIAL_ENDED)
         return
     text = (update.message.text or "").strip()
@@ -72,8 +73,7 @@ def gated(callback):
         if not profile.get("profile_complete"):
             await update.effective_message.reply_text("Сначала заполним анкету: /start.")
             return
-        instant = update.effective_message.date if update.effective_message else None
-        if not await query(db.access_active,profile["id"],instant):
+        if not await query(db.access_active,profile["id"],datetime.now(timezone.utc)):
             await update.effective_message.reply_text(TRIAL_ENDED)
             return
         return await callback(update,context)
