@@ -201,6 +201,16 @@ async def recommendations_command(update, context):
             lines.append(f"• Средний записанный интервал — {recent['average_gap_hours']} ч. Попробуй заранее планировать следующий приём ближе к трём часам.")
         else:
             lines.append(f"• Средний записанный интервал — {recent['average_gap_hours']} ч: режим выглядит достаточно регулярным.")
+    if recent["logged_days"] >= 3:
+        if recent["unique_foods"] <= recent["logged_days"]+2:
+            lines.append(
+                "• По записям питание пока довольно однообразное. Выбери одно посильное "
+                "добавление на ближайшие дни — например овощ, фрукт, новую крупу или бобовые. "
+                "Это не требование идеальности, а небольшой способ позаботиться о себе.")
+        else:
+            lines.append(
+                f"• За неделю отмечено не меньше {recent['unique_foods']} разных продуктов — "
+                "разнообразие уже появляется. Продолжай без необходимости делать идеальным каждый приём.")
     if routine:
         lines.append(f"• В {routine['regular_days']} днях с интервалами до 4 часов среднее изменение к утру было "
                      f"{routine['regular_mean_kg']:+.2f} кг; в {routine['irregular_days']} других днях — "
