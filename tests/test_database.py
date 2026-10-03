@@ -90,6 +90,25 @@ def test_weight_upsert_and_profile_persist(database,profile):
     assert database.get_weights(42,date(2026,10,1),date(2026,10,3)) == [(date(2026,10,2),80.3)]
     assert database.load_user_data(42)["weight"] == 80.3
 
+def test_trial_and_future_access_grants(database,profile):
+    before = datetime(2026,12,31,tzinfo=UTC)
+    after = datetime(2027,1,2,tzinfo=UTC)
+    assert database.access_active(42,before)
+    assert not database.access_active(42,after)
+    database.add_access_grant(42,"gift",starts_at=after,ends_at=after+timedelta(days=30))
+    assert database.access_active(42,after+timedelta(days=1))
+
+def test_edit_replaces_instead_of_duplicating(database,profile,meal_payload):
+    draft = database.save_draft(42,"tg:42:edit",meal_payload)
+    assert database.confirm_draft(42,draft["id"])
+    assert database.start_edit_draft(42,draft["id"])
+    replacement = [{**meal_payload[0],"raw":"рис","calories":300,
+                    "items":[{"name":"рис","grams":150}]}]
+    assert database.replace_draft(42,draft["id"],replacement)
+    start,end = day_bounds(date(2026,10,2),profile)
+    meals = database.load_meals(42,start,end)
+    assert len(meals) == 1 and meals[0]["raw"] == "рис" and meals[0]["calories"] == 300
+
 def test_partial_diary_and_short_weight_history_are_not_overinterpreted(database,profile,meal_payload):
     draft = database.save_draft(42,"tg:42:1",meal_payload)
     database.confirm_draft(42,draft["id"])
@@ -141,7 +160,8 @@ def test_single_instance_lock_rejects_second_process(database):
 
 def test_additive_migration_keeps_legacy_data(database):
     with database.get_connection() as conn,conn.cursor() as cur:
-        cur.execute("DROP TABLE schema_migrations,notification_claims,water_entries,pending_meals,notifications,meals,weights,users CASCADE")
+        cur.execute("DROP TABLE schema_migrations,daily_checkins,access_grants,notification_claims,"
+                    "water_entries,pending_meals,notifications,meals,weights,users CASCADE")
         cur.execute("CREATE TABLE users(id BIGINT PRIMARY KEY,name TEXT,phone TEXT,tz_offset INT DEFAULT 0,age INT,gender TEXT,weight FLOAT,height INT,activity INT,goal TEXT)")
         cur.execute("CREATE TABLE meals(id SERIAL PRIMARY KEY,user_id BIGINT REFERENCES users(id),time TIMESTAMPTZ NOT NULL,calories INT,protein FLOAT,fat FLOAT,carbs FLOAT,raw TEXT,meal_kind TEXT,portion FLOAT DEFAULT 1,oil_extra INT DEFAULT 0)")
         cur.execute("INSERT INTO users VALUES(42,'Legacy',NULL,300,34,'Женский',80,165,2,'Похудеть')")

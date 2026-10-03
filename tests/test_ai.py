@@ -56,7 +56,7 @@ async def test_report_failure_returns_support(monkeypatch):
     monkeypatch.setattr(analysis_service,"get_client",lambda:fake)
     day = {"totals":{"meals":1},"meals":[{"local_time":"12:00","raw":"еда","calories":350}]}
     answer = await analysis_service.analyze_day(day,{})
-    assert "Я с тобой" in answer
+    assert "отдохнуть" in answer
     args = fake.chat.completions.create.call_args.kwargs
     assert args["max_tokens"] == 450
 
@@ -64,7 +64,7 @@ async def test_empty_day_does_not_call_ai(monkeypatch):
     fake = client("not used")
     monkeypatch.setattr(analysis_service,"get_client",lambda:fake)
     text = await analysis_service.analyze_day({"meals":[]},{})
-    assert "не означает" in text
+    assert "нет записей" in text
     fake.chat.completions.create.assert_not_called()
 
 async def test_telegram_client_ignores_global_proxy(monkeypatch):
@@ -72,4 +72,3 @@ async def test_telegram_client_ignores_global_proxy(monkeypatch):
     request = TelegramRequest()
     assert request._client._trust_env is False
     await request.shutdown()
-

@@ -1,12 +1,13 @@
 """Notification content. Scheduling and durable deduplication live separately."""
-from nutrition import MORNING, MEAL_REMINDER
+from nutrition import MORNING_VARIANTS, MEAL_REMINDER
 from services.analysis_service import daily_report
 from services.storage import query
 import db
 
 async def notification_text(kind, user, local_now):
     if kind == "morning":
-        return MORNING.format(name=user.get("name") or "друг")
+        template = MORNING_VARIANTS[local_now.date().toordinal()%len(MORNING_VARIANTS)]
+        return template.format(name=user.get("name") or "друг")
     if kind == "meal":
         return MEAL_REMINDER
     return await daily_report(user["id"],user,local_now.date())

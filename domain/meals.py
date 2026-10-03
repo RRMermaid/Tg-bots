@@ -5,6 +5,28 @@ from datetime import timedelta
 from config import MAX_MEALS_PER_MESSAGE, MAX_MESSAGE_CHARS, MAX_MEAL_CHARS
 from domain.tz import user_timezone
 
+PORTION_RE = re.compile(
+    r"(?:\b\d+(?:[.,]\d+)?\s*(?:г|гр|кг|мл|л|шт|штук[аи]?|лож(?:ка|ки|ек)|"
+    r"ст\.\s*л\.?|ч\.\s*л\.?|стакан(?:а|ов)?|чашк(?:а|и|ек)|кус(?:ок|ка|ков)|"
+    r"тарелк(?:а|и|у)|порци(?:я|и|ю)|пачк(?:а|и|у)|половин(?:а|у|ы))\b|"
+    r"\b(?:лож(?:ка|ки|ек)|тарелк(?:а|и|у)|стакан|чашка|кусок|порция|половина)\b)", re.I)
+
+
+def has_portion_detail(text: str) -> bool:
+    """A calorie total or an explicit count/household measure is enough to estimate."""
+    if re.search(r"\d+(?:[.,]\d+)?\s*(?:ккал|калорий|kcal)\b",text,re.I):
+        return True
+    if PORTION_RE.search(text):
+        return True
+    # Countable foods: "2 яйца", "один банан". The timestamp is already removed.
+    return bool(re.search(r"\b(?:\d+(?:[.,]\d+)?|один|одна|одно|два|две|три|четыре|половина)\s+[а-яё]",text,re.I))
+
+
+def meal_reminder_minutes(raw: str, meal_kind: str) -> int:
+    if meal_kind in ("soup","eggs","light") or re.search(r"\b(?:суп|яйц|омлет)",raw,re.I):
+        return 120
+    return 180
+
 def split_meals(text: str, received_at, profile: dict) -> list[dict]:
     text = text.strip()
     if not text or len(text) > MAX_MESSAGE_CHARS:
@@ -62,6 +84,9 @@ def validate_nutrition(data: dict) -> dict:
         "meal_kind": str(data.get("meal_kind", "meal"))[:30],
         "estimated": True, "items": [],
         "assumptions": str(data.get("assumptions") or "")[:300],
+        "needs_clarification": bool(data.get("needs_clarification",False)),
+        "clarification_question": str(data.get("clarification_question") or "")[:300],
+        "comment": str(data.get("comment") or "")[:300],
     }
     items = data.get("items")
     if not isinstance(items, list) or len(items) > 20:
@@ -73,6 +98,7 @@ def validate_nutrition(data: dict) -> dict:
             "name": item["name"].strip().lower()[:80],
             "grams": number(item.get("grams"), 10000, True),
         })
+    result["reminder_minutes"] = meal_reminder_minutes("",result["meal_kind"])
     return result
 
 def manual_nutrition(text: str):
@@ -87,4 +113,7 @@ def manual_nutrition(text: str):
     calories = round(number(float(match[1].replace(",", ".")), 20000))
     return {"is_food": True, "calories": calories, "protein_g": None,
             "fat_g": None, "carbs_g": None, "items": [], "meal_kind": "manual",
-            "estimated": False, "assumptions": "Калории указаны вручную; БЖУ неизвестны."}
+            "estimated": False, "assumptions": "Калории указаны вручную; БЖУ неизвестны.",
+            "needs_clarification":False,"clarification_question":"",
+            "comment":"Калории указаны вручную, поэтому состав КБЖУ пока не рассчитан.",
+            "reminder_minutes":180}

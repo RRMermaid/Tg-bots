@@ -1,10 +1,12 @@
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 import math
 import pytest
 from domain.tz import parse_tz,timezone_name,day_bounds,parse_clock
-from domain.meals import split_meals,validate_nutrition,manual_nutrition
+from domain.meals import split_meals,validate_nutrition,manual_nutrition,has_portion_detail,meal_reminder_minutes
+from domain.calories import calculate_calorie_range,reached_milestones
 from handlers.start_flow import numeric
 from services.scheduler import due_reminders
+from db import add_calendar_months
 
 UTC = timezone.utc
 
@@ -83,6 +85,32 @@ def test_negative_manual_calories_rejected():
     with pytest.raises(ValueError):
         manual_nutrition("-350 ккал")
 
+def test_portion_detail_requires_a_measure_or_count():
+    assert has_portion_detail("150 г гречки")
+    assert has_portion_detail("2 яйца")
+    assert has_portion_detail("ложка пюре")
+    assert not has_portion_detail("макароны с котлетой")
+
+def test_strict_corridor_only_moves_upper_boundary():
+    comfortable = calculate_calorie_range(2000,"Похудеть",10)
+    strict = calculate_calorie_range(2000,"Похудеть",20)
+    assert comfortable == (1400,1800)
+    assert strict == (1400,1600)
+
+def test_milestones_follow_goal_direction():
+    assert reached_milestones(86,80.9,"Похудеть") == 1
+    assert reached_milestones(55,65.2,"Набрать массу") == 2
+    assert reached_milestones(80,70,"Удержать вес") == 0
+
+def test_trial_uses_calendar_months():
+    start = datetime(2026,1,31,12,tzinfo=UTC)
+    assert add_calendar_months(start,3) == datetime(2026,4,30,12,tzinfo=UTC)
+
+def test_meal_kind_controls_reminder():
+    assert meal_reminder_minutes("тарелка супа","soup") == 120
+    assert meal_reminder_minutes("2 яйца","dense") == 120
+    assert meal_reminder_minutes("гречка с курицей","dense") == 180
+
 @pytest.mark.parametrize("text",["nan","inf","0","-80","4000"])
 def test_invalid_weight(text):
     with pytest.raises(ValueError):
@@ -91,7 +119,7 @@ def test_invalid_weight(text):
 def user(**values):
     return {"id":42,"timezone":"Asia/Yekaterinburg","profile_complete":True,
             "reminders_enabled":True,"morning_time":"08:00","evening_time":"21:00",
-            "interval_hours":4,**values}
+            "interval_hours":4,"last_meal_reminder_minutes":180,**values}
 
 def test_morning_follows_user_clock():
     due = due_reminders(user(),datetime(2026,10,2,3,5,tzinfo=UTC))
@@ -101,9 +129,16 @@ def test_morning_follows_user_clock():
 def test_food_reminder_and_quiet_hours():
     stamp = datetime(2026,10,2,7,tzinfo=UTC)
     u = user(last_meal_time=stamp,last_meal_id=5)
-    due = due_reminders(u,stamp.replace(hour=11))
+    due = due_reminders(u,stamp.replace(hour=10))
     assert ("meal","5") in [entry[:2] for entry in due]
     assert not due_reminders(u,stamp.replace(hour=20))
+
+def test_meal_reminder_is_skipped_close_to_evening_report():
+    # 17:00 UTC is 22:00 for the user; use an 18:00 local meal due at 20:00,
+    # one hour before the 21:00 report.
+    stamp = datetime(2026,10,2,13,tzinfo=UTC)
+    u = user(last_meal_time=stamp,last_meal_id=5,last_meal_reminder_minutes=120)
+    assert not any(item[0] == "meal" for item in due_reminders(u,stamp+timedelta(hours=2)))
 
 @pytest.mark.parametrize("values",[{"reminders_enabled":False},{"timezone":None},{"profile_complete":False}])
 def test_disabled_or_unconfirmed_never_notified(values):

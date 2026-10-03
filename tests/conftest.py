@@ -27,13 +27,19 @@ def database(postgres_uri, monkeypatch):
     monkeypatch.setenv("DATABASE_URL",postgres_uri)
     db.create_tables()
     with db.get_connection() as conn, conn.cursor() as cur:
-        cur.execute("TRUNCATE pending_meals, meals, weights, water_entries, notification_claims, notifications, users RESTART IDENTITY CASCADE")
+        cur.execute("TRUNCATE daily_checkins, access_grants, pending_meals, meals, weights, "
+                    "water_entries, notification_claims, notifications, users RESTART IDENTITY CASCADE")
     return db
 
 @pytest.fixture
 def profile(database):
     fields = {"name":"Тест","timezone":"Asia/Yekaterinburg","age":34,"gender":"Женский",
               "weight":80.0,"height":165,"activity":2,"goal":"Похудеть",
+              "target_weight":65.0,"focus_areas":["Соблюдать режим питания"],
+              "deficit_percent":10,"calorie_lower":1450,"calorie_upper":1850,
+              "goal_start_weight":80.0,"onboarding_version":2,
+              "trial_started_at":"2026-09-01T00:00:00+00:00",
+              "trial_ends_at":"2027-01-01T00:00:00+00:00",
               "profile_complete":True,"flow_step":None}
     database.save_user_data(42,fields)
     return database.load_user_data(42)

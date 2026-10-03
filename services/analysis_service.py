@@ -24,7 +24,14 @@ def day_summary(user_id, day, profile):
         totals[key+"_missing"] = sum(m[key] is None for m in meals)
     gaps = [(b["time"]-a["time"]).total_seconds()/3600 for a,b in zip(meals,meals[1:])]
     totals["gaps_over_5h"] = sum(g > 5 for g in gaps)
-    return {"date":day.isoformat(),"totals":totals,"meals":meals}
+    totals["average_gap_hours"] = round(mean(gaps),1) if gaps else None
+    weights = db.get_weights(user_id,day-timedelta(days=1),day)
+    return {"date":day.isoformat(),"totals":totals,"meals":meals,"weights":weights,
+            "goal":profile.get("goal"),
+            "target_weight":profile.get("target_weight"),
+            "focus_areas":profile.get("focus_areas") or [],
+            "limitations":profile.get("limitations"),
+            "corridor":{"lower":profile.get("calorie_lower"),"upper":profile.get("calorie_upper")}}
 
 def history_summary(user_id, end_day, profile, days=14):
     if not 1 <= days <= 28:
@@ -83,6 +90,29 @@ def food_patterns(user_id, end_day, profile):
             "with_mean_kg":round(mean(with_food),2),"without_mean_kg":round(mean(without),2)})
     return sorted(results,key=lambda r:abs(r["with_mean_kg"]-r["without_mean_kg"]),reverse=True)[:5]
 
+
+def routine_weight_pattern(user_id, end_day, profile):
+    """Compare next-morning changes on sufficiently logged regular/irregular days."""
+    start_day = end_day-timedelta(days=27)
+    start,end = day_bounds(start_day,profile)[0],day_bounds(end_day,profile)[1]
+    meals = db.load_meals(user_id,start,end)
+    weights = dict(db.get_weights(user_id,start_day,end_day+timedelta(days=1)))
+    daily = defaultdict(list)
+    tz = user_timezone(profile)
+    for meal in meals:
+        daily[meal["time"].astimezone(tz).date()].append(meal)
+    regular,irregular = [],[]
+    for day,rows in daily.items():
+        if len(rows) < 3 or day not in weights or day+timedelta(days=1) not in weights:
+            continue
+        gaps = [(b["time"]-a["time"]).total_seconds()/3600 for a,b in zip(rows,rows[1:])]
+        delta = weights[day+timedelta(days=1)]-weights[day]
+        (regular if gaps and max(gaps) <= 4 else irregular).append(delta)
+    if len(regular) < 3 or len(irregular) < 3:
+        return None
+    return {"regular_days":len(regular),"irregular_days":len(irregular),
+            "regular_mean_kg":round(mean(regular),2),"irregular_mean_kg":round(mean(irregular),2)}
+
 def render_totals(day):
     t = day["totals"]
     lines = [f"Твой дневник за {day['date']}: {t['meals']} приёмов пищи."]
@@ -94,8 +124,24 @@ def render_totals(day):
         return f"{label}: ~{t[key]:g} {unit}{suffix}."
     lines.extend([amount("calories","Калории","ккал"),amount("protein","Белки","г"),
                   amount("fat","Жиры","г"),amount("carbs","Углеводы","г")])
+    low,high = day.get("corridor",{}).get("lower"),day.get("corridor",{}).get("upper")
+    if low is not None and high is not None and not t["calories_missing"]:
+        if low <= t["calories"] <= high:
+            lines.append(f"Ориентир {low}–{high} ккал соблюдён.")
+        elif t["calories"] < low:
+            lines.append(f"По записям получилось примерно на {round(low-t['calories'])} ккал ниже ориентира.")
+        else:
+            lines.append(f"По записям получилось примерно на {round(t['calories']-high)} ккал выше ориентира.")
+    if t["average_gap_hours"] is not None:
+        lines.append(f"Средний интервал между записями: {t['average_gap_hours']} ч.")
+    if t["gaps_over_5h"]:
+        lines.append(f"Интервалов дольше 5 часов: {t['gaps_over_5h']}.")
     if t["water_ml"]:
         lines.append(f"Записанная вода: {t['water_ml']} мл.")
+    if day.get("weights"):
+        today = next((weight for stamp,weight in day["weights"] if stamp.isoformat()==day["date"]),None)
+        if today is not None:
+            lines.append(f"Вес: {today:g} кг.")
     return "\n".join(lines)
 
 async def analyze_day(day, history):
@@ -103,9 +149,9 @@ async def analyze_day(day, history):
         from nutrition import EVENING_EMPTY
         return EVENING_EMPTY
     client = get_client()
-    fallback = ("Спасибо, что находишь время для дневника. Записанное — часть картины, "
-                "а не оценка тебя. Завтра можно продолжить с одного удобного шага. "
-                "Сейчас позаботься об отдыхе и сне. Я с тобой.")
+    fallback = ("Сегодня ты продолжил(а) наблюдать за питанием — это уже полезный шаг. "
+                "Завтра выбери одно небольшое улучшение: заранее продумай следующий приём пищи. "
+                "А сейчас пора отдохнуть и выспаться.")
     if client is None:
         return fallback
     try:

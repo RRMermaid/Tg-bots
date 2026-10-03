@@ -6,14 +6,27 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 UTC = timezone.utc
 CITY_ZONES = {
     "тюмень": "Asia/Yekaterinburg", "екатеринбург": "Asia/Yekaterinburg",
-    "москва": "Europe/Moscow", "казань": "Europe/Moscow",
-    "самара": "Europe/Samara", "новосибирск": "Asia/Novosibirsk",
+    "челябинск": "Asia/Yekaterinburg", "уфа": "Asia/Yekaterinburg",
+    "пермь": "Asia/Yekaterinburg", "курган": "Asia/Yekaterinburg",
+    "москва": "Europe/Moscow", "санкт-петербург": "Europe/Moscow",
+    "санкт петербург": "Europe/Moscow", "казань": "Europe/Moscow",
+    "нижний новгород": "Europe/Moscow", "ростов-на-дону": "Europe/Moscow",
+    "воронеж": "Europe/Moscow", "краснодар": "Europe/Moscow",
+    "самара": "Europe/Samara", "ижевск": "Europe/Samara",
+    "саратов": "Europe/Saratov", "астрахань": "Europe/Astrakhan",
+    "волгоград": "Europe/Volgograd", "омск": "Asia/Omsk",
+    "новосибирск": "Asia/Novosibirsk", "барнаул": "Asia/Barnaul",
+    "томск": "Asia/Tomsk", "кемерово": "Asia/Novokuznetsk",
     "красноярск": "Asia/Krasnoyarsk", "иркутск": "Asia/Irkutsk",
-    "владивосток": "Asia/Vladivostok", "калининград": "Europe/Kaliningrad",
+    "чита": "Asia/Chita", "якутск": "Asia/Yakutsk",
+    "хабаровск": "Asia/Vladivostok", "владивосток": "Asia/Vladivostok",
+    "магадан": "Asia/Magadan", "петропавловск-камчатский": "Asia/Kamchatka",
+    "калининград": "Europe/Kaliningrad",
 }
 
 def parse_tz(text: str):
-    value = CITY_ZONES.get(text.strip().lower(), text.strip())
+    cleaned = re.sub(r"^г\.?\s*","",text.strip(),flags=re.I)
+    value = CITY_ZONES.get(cleaned.lower(), cleaned)
     try:
         return ZoneInfo(value)
     except (ZoneInfoNotFoundError, ValueError):

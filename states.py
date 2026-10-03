@@ -1,11 +1,20 @@
 from enum import StrEnum
 
 class BotState(StrEnum):
-    TIMEZONE = "timezone"
     NAME = "name"
+    CONTACT = "contact"
+    TIMEZONE = "timezone"
     GENDER = "gender"
     AGE = "age"
     WEIGHT = "weight"
+    TARGET_WEIGHT = "target_weight"
     HEIGHT = "height"
     ACTIVITY = "activity"
     GOAL = "goal"
+    FOCUS = "focus"
+    LIMITATIONS = "limitations"
+    MORNING_TIME = "morning_time"
+    EVENING_TIME = "evening_time"
+    DEFICIT = "deficit"
+    LOG_WEIGHT = "log_weight"
+    WEIGHT_CONTEXT = "weight_context"

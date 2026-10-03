@@ -54,7 +54,7 @@ async def test_numeric_weight_is_not_consumed_as_food(telegram_app,profile,datab
     estimator.assert_not_called()
     assert "сохранён" in request.sent[-1]
 
-async def test_plain_food_estimated_once_and_draft_survives_restart(telegram_app,profile,database,monkeypatch):
+async def test_plain_food_estimated_once_and_saved_automatically(telegram_app,profile,database,monkeypatch):
     application,request = telegram_app
     estimate = {"is_food":True,"calories":350,"protein_g":20,"fat_g":10,"carbs_g":45,
                 "items":[{"name":"гречка","grams":150}],"estimated":True,
@@ -66,14 +66,13 @@ async def test_plain_food_estimated_once_and_draft_survives_restart(telegram_app
     await application.process_update(update)
     estimator.assert_awaited_once()
     draft = database.get_draft(42,source_key="tg:42:3")
-    assert draft and draft["state"] == "pending"
+    assert draft and draft["state"] == "confirmed"
     start,end = day_bounds(date(2026,10,2),profile)
-    assert database.load_meals(42,start,end) == []
-    # A fresh app shares no state with the previous app; the draft remains in SQL.
+    assert database.load_meals(42,start,end)[0]["raw"] == "150 г гречки"
+    # A fresh app shares no state with the previous app; SQL still prevents duplicates.
     restarted = app.build_application(bot=application.bot)
     assert restarted.user_data == {}
-    assert database.confirm_draft(42,draft["id"])
-    assert database.load_meals(42,start,end)[0]["raw"] == "150 г гречки"
+    assert not database.confirm_draft(42,draft["id"])
 
 async def test_manual_input_does_not_call_gpt(telegram_app,profile,database,monkeypatch):
     application,_ = telegram_app
@@ -81,7 +80,18 @@ async def test_manual_input_does_not_call_gpt(telegram_app,profile,database,monk
     monkeypatch.setattr(meals,"estimate_meal_nutrition",estimator)
     await application.process_update(text_update(application,"350 ккал"))
     estimator.assert_not_called()
-    assert database.get_draft(42,source_key="tg:42:1")["payload"][0]["protein_g"] is None
+    draft = database.get_draft(42,source_key="tg:42:1")
+    assert draft["state"] == "confirmed" and draft["payload"][0]["protein_g"] is None
+
+async def test_missing_portion_is_asked_before_ai(telegram_app,profile,database,monkeypatch):
+    application,request = telegram_app
+    estimator = AsyncMock(side_effect=AssertionError("AI must wait for a portion"))
+    monkeypatch.setattr(meals,"estimate_meal_nutrition",estimator)
+    await application.process_update(text_update(application,"макароны с котлетой",7))
+    estimator.assert_not_called()
+    draft = database.get_draft(42,source_key="tg:42:7")
+    assert draft["state"] == "clarifying"
+    assert "Уточни" in request.sent[-1]
 
 async def test_name_step_keeps_timezone_and_survives_new_application(telegram_app,database):
     application,_ = telegram_app
@@ -90,9 +100,9 @@ async def test_name_step_keeps_timezone_and_survives_new_application(telegram_ap
     profile = database.load_user_data(42)
     assert profile["timezone"] == "Asia/Yekaterinburg"
     assert profile["morning_time"] == "09:30"
-    assert profile["flow_step"] == "gender"
-    await application.process_update(text_update(application,"Женский",2))
-    assert database.load_user_data(42)["flow_step"] == "age"
+    assert profile["flow_step"] == "contact"
+    await application.process_update(text_update(application,"Пропустить",2))
+    assert database.load_user_data(42)["flow_step"] == "timezone"
 
 async def test_start_for_existing_user_does_not_reset_profile(telegram_app,profile,database):
     application,_ = telegram_app
