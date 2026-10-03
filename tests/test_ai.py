@@ -1,6 +1,6 @@
 import json
 from types import SimpleNamespace
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, Mock
 import pytest
 import config
 from services import openai_service,analysis_service
@@ -12,6 +12,18 @@ def client(content,reason="stop"):
         finish_reason=reason,message=SimpleNamespace(content=content))])
     create = AsyncMock(return_value=response)
     return SimpleNamespace(chat=SimpleNamespace(completions=SimpleNamespace(create=create)))
+
+def test_openai_gateway_base_url_is_forwarded(monkeypatch):
+    fake_client = Mock()
+    constructor = Mock(return_value=fake_client)
+    monkeypatch.setattr(openai_service, "AsyncOpenAI", constructor)
+    monkeypatch.setattr(openai_service, "_client", None)
+    monkeypatch.setattr(config, "OPENAI_API_KEY", "mg_live_test")
+    monkeypatch.setattr(config, "OPENAI_BASE_URL", "https://api.model-gate.com/v1")
+    monkeypatch.setattr(config, "OPENAI_PROXY_URL", "")
+
+    assert openai_service.get_client() is fake_client
+    assert constructor.call_args.kwargs["base_url"] == "https://api.model-gate.com/v1"
 
 async def test_ai_valid_json_and_fixed_budget(monkeypatch):
     fake = client(json.dumps({"is_food":True,"calories":350,"protein_g":None,
