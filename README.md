@@ -23,6 +23,16 @@ cp .env.example .env
 новых пользователях и завершении тестовых периодов). Узнать ID можно командой
 `/myid`. База находится в постоянном томе `diary-data` и не публикуется в интернет.
 
+Для OpenAI-совместимого шлюза укажите его адрес в `OPENAI_BASE_URL`. Например,
+для Model Gate:
+
+```env
+OPENAI_BASE_URL=https://api.model-gate.com/v1
+```
+
+`OPENAI_PROXY_URL` — это транспортный прокси, а не API-шлюз. Для Model Gate
+он не нужен, если Docker уже выходит в интернет через системный VPN.
+
 ```bash
 docker compose up -d --build
 docker compose logs --tail=50 bot
