@@ -2,7 +2,8 @@ from datetime import date, datetime, timedelta, timezone
 import math
 import pytest
 from domain.tz import parse_tz,timezone_name,day_bounds,parse_clock
-from domain.meals import split_meals,validate_nutrition,manual_nutrition,has_portion_detail,meal_reminder_minutes
+from domain.meals import (basic_nutrition, has_portion_detail, manual_nutrition,
+                          meal_reminder_minutes, split_meals, validate_nutrition)
 from domain.calories import calculate_calorie_range,reached_milestones
 from handlers.start_flow import numeric
 from services.scheduler import due_reminders
@@ -90,6 +91,30 @@ def test_portion_detail_requires_a_measure_or_count():
     assert has_portion_detail("2 яйца")
     assert has_portion_detail("ложка пюре")
     assert not has_portion_detail("макароны с котлетой")
+
+@pytest.mark.parametrize("text",["2 яйца","два вареных яйца","я съела два яйца"])
+def test_basic_eggs_are_calculated_locally(text):
+    result = basic_nutrition(text)
+    assert result["calories"] == 156
+    assert result["protein_g"] == 12.6
+    assert result["meal_kind"] == "eggs"
+
+def test_local_calculator_does_not_ignore_other_foods():
+    assert basic_nutrition("2 яйца и бутерброд") is None
+
+def test_buckwheat_and_cutlet_use_explicit_and_average_portions():
+    result = basic_nutrition("гречки 200 грамм, котлета среднего размера")
+    assert result["calories"] == 418
+    assert result["items"] == [
+        {"name":"гречка варёная","grams":200.0},
+        {"name":"котлета из курицы и говядины","grams":90},
+    ]
+    assert "котлета принята за 90 г" in result["assumptions"]
+
+def test_buckwheat_and_cutlet_default_to_typical_portions():
+    result = basic_nutrition("вареная гречка и котлета курица с говядиной")
+    assert result["calories"] == 363
+    assert "гречка принята за 150 г" in result["assumptions"]
 
 def test_strict_corridor_only_moves_upper_boundary():
     comfortable = calculate_calorie_range(2000,"Похудеть",10)

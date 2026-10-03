@@ -11,6 +11,18 @@ PORTION_RE = re.compile(
     r"тарелк(?:а|и|у)|порци(?:я|и|ю)|пачк(?:а|и|у)|половин(?:а|у|ы))\b|"
     r"\b(?:лож(?:ка|ки|ек)|тарелк(?:а|и|у)|стакан|чашка|кусок|порция|половина)\b)", re.I)
 
+COUNT_WORDS = {
+    "одно":1, "один":1, "одна":1, "два":2, "две":2, "три":3,
+    "четыре":4, "пять":5, "шесть":6, "семь":7, "восемь":8,
+    "девять":9, "десять":10,
+}
+
+EGG_RE = re.compile(
+    r"^(?:я\s+(?:съел[аи]?|поел[аи]?)\s+)?"
+    r"(?P<count>\d+|одно|один|одна|два|две|три|четыре|пять|шесть|семь|восемь|девять|десять)\s+"
+    r"(?:(?:вар[её]н(?:ое|ые|ых)|отварн(?:ое|ые|ых)|курин(?:ое|ые|ых)|сырое|сырые|сырых)\s+){0,3}"
+    r"(?:яйцо|яйца|яиц)$", re.I)
+
 
 def has_portion_detail(text: str) -> bool:
     """A calorie total or an explicit count/household measure is enough to estimate."""
@@ -20,6 +32,72 @@ def has_portion_detail(text: str) -> bool:
         return True
     # Countable foods: "2 яйца", "один банан". The timestamp is already removed.
     return bool(re.search(r"\b(?:\d+(?:[.,]\d+)?|один|одна|одно|два|две|три|четыре|половина)\s+[а-яё]",text,re.I))
+
+
+def basic_nutrition(text: str):
+    """Calculate a few unambiguous staples locally when the AI service is unavailable."""
+    normalized = re.sub(r"\s+", " ", text.strip().lower().replace("ё", "е"))
+    match = EGG_RE.fullmatch(normalized)
+    if match:
+        raw_count = match["count"]
+        count = int(raw_count) if raw_count.isdigit() else COUNT_WORDS[raw_count]
+        if not 1 <= count <= 20:
+            raise ValueError("Количество яиц должно быть от 1 до 20.")
+        # Average large boiled/chicken egg: values vary by size.
+        return {
+            "is_food":True,
+            "calories":round(78*count),
+            "protein_g":round(6.3*count,1),
+            "fat_g":round(5.3*count,1),
+            "carbs_g":round(0.6*count,1),
+            "items":[{"name":"яйцо куриное","grams":50*count}],
+            "meal_kind":"eggs",
+            "estimated":True,
+            "assumptions":"Расчёт по среднему куриному яйцу без добавленного масла.",
+            "needs_clarification":False,
+            "clarification_question":"",
+            "comment":"Яйца дают белок и жиры.",
+            "reminder_minutes":120,
+        }
+
+    # A common plate that can be estimated safely enough from typical portions.
+    tokens = re.findall(r"[а-яa-z]+|\d+(?:[.,]\d+)?", normalized)
+    allowed_words = {"и","с","среднего","средняя","размера","размер","г","гр",
+                     "грамм","грамма","граммов"}
+    known_plate = all(token[0].isdigit() or token in allowed_words or
+                      token.startswith(("греч","варен","котлет","куриц","говядин","говяж"))
+                      for token in tokens)
+    if "греч" in normalized and "котлет" in normalized and known_plate:
+        grams_match = re.search(r"греч\w*\s+(\d+(?:[.,]\d+)?)\s*(?:г|гр|грамм\w*)\b", normalized)
+        buckwheat_g = float(grams_match[1].replace(",", ".")) if grams_match else 150
+        cutlet_count = re.search(r"\b(\d+)\s+котлет", normalized)
+        cutlet_g = 90*(int(cutlet_count[1]) if cutlet_count else 1)
+        if not 20 <= buckwheat_g <= 1000 or not 30 <= cutlet_g <= 1000:
+            raise ValueError("Порция выглядит необычно большой или маленькой. Проверь количество.")
+        # Cooked buckwheat per 100 g + a typical mixed chicken/beef cutlet per 100 g.
+        factors = ((buckwheat_g,(110,4.2,1.1,21.3)),(cutlet_g,(220,16,15,6)))
+        totals = [sum(grams/100*values[i] for grams,values in factors) for i in range(4)]
+        assumptions = []
+        if not grams_match:
+            assumptions.append("гречка принята за 150 г")
+        assumptions.append(f"котлета принята за {cutlet_g:g} г и типичный смешанный рецепт")
+        return {
+            "is_food":True,
+            "calories":round(totals[0]),
+            "protein_g":round(totals[1],1),
+            "fat_g":round(totals[2],1),
+            "carbs_g":round(totals[3],1),
+            "items":[{"name":"гречка варёная","grams":buckwheat_g},
+                     {"name":"котлета из курицы и говядины","grams":cutlet_g}],
+            "meal_kind":"dense",
+            "estimated":True,
+            "assumptions":"; ".join(assumptions)+".",
+            "needs_clarification":False,
+            "clarification_question":"",
+            "comment":"В приёме есть белок и сложные углеводы.",
+            "reminder_minutes":180,
+        }
+    return None
 
 
 def meal_reminder_minutes(raw: str, meal_kind: str) -> int:

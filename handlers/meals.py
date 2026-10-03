@@ -2,7 +2,7 @@ import re
 from datetime import datetime, timedelta
 
 import db
-from domain.meals import (has_portion_detail, manual_nutrition, meal_reminder_minutes,
+from domain.meals import (basic_nutrition, manual_nutrition, meal_reminder_minutes,
                           split_meals)
 from domain.tz import user_timezone
 from keyboards import edit_meal_keyboard, main_menu_kb
@@ -36,9 +36,7 @@ async def prepare_payload(parts):
             continue
         if re.fullmatch(r"(?:выпил[а]?\s+)?вод[аыу]",raw,re.I):
             raise ValueError("Напиши объём воды: «вода 250 мл».")
-        nutrition = manual_nutrition(raw)
-        if nutrition is None and not has_portion_detail(raw):
-            return None,part
+        nutrition = manual_nutrition(raw) or basic_nutrition(raw)
         if nutrition is None:
             nutrition = await estimate_meal_nutrition(raw)
         if nutrition is None:
@@ -61,6 +59,10 @@ def meal_lines(meal):
     lines = [f"🍽 {meal['raw']}",f"Примерно {meal['calories']} ккал · "+" · ".join(macros)]
     if meal.get("comment"):
         lines.append(meal["comment"])
+    if meal.get("estimated"):
+        assumption = str(meal.get("assumptions") or "").strip().rstrip(".")
+        assumption = assumption or "взяты средняя порция и типичный рецепт"
+        lines.append(f"Оценка приблизительная: {assumption[0].lower()+assumption[1:]}. Фактические значения могут отличаться.")
     return lines
 
 
@@ -123,25 +125,11 @@ async def record_meal(update, context, profile):
     uid = profile["id"]
     text = (update.message.text or "").strip()
 
+    # Older versions could leave the user stuck in a portion-clarification state.
+    # New entries use an average portion instead, so retire that stale draft.
     clarification = await query(db.get_active_draft,uid,"clarifying")
     if clarification:
-        if not has_portion_detail(text):
-            await update.message.reply_text(portion_question(clarification["payload"][0]["raw"]))
-            return
-        original = clarification["payload"][0]
-        combined = original["raw"]+f"; уточнение порции: {text}"
-        parts = [{"time":datetime.fromisoformat(original["time"]),"raw":combined}]
-        try:
-            payload,missing = await prepare_payload(parts)
-            if missing:
-                await update.message.reply_text(missing.get("question") or portion_question(original["raw"]))
-                return
-            await query(db.update_draft,uid,clarification["id"],payload,"pending")
-            refreshed = await query(db.get_draft,uid,draft_id=clarification["id"])
-            await finish_save(update,profile,refreshed,payload)
-        except ValueError as exc:
-            await update.message.reply_text(str(exc))
-        return
+        await query(db.update_draft,uid,clarification["id"],clarification["payload"],"cancelled")
 
     editing = await query(db.get_active_draft,uid,"editing")
     source = f"tg:{update.effective_chat.id}:{update.message.message_id}"

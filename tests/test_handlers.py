@@ -83,15 +83,30 @@ async def test_manual_input_does_not_call_gpt(telegram_app,profile,database,monk
     draft = database.get_draft(42,source_key="tg:42:1")
     assert draft["state"] == "confirmed" and draft["payload"][0]["protein_g"] is None
 
-async def test_missing_portion_is_asked_before_ai(telegram_app,profile,database,monkeypatch):
+async def test_basic_eggs_do_not_depend_on_ai(telegram_app,profile,database,monkeypatch):
     application,request = telegram_app
-    estimator = AsyncMock(side_effect=AssertionError("AI must wait for a portion"))
+    estimator = AsyncMock(side_effect=AssertionError("Simple eggs must be calculated locally"))
+    monkeypatch.setattr(meals,"estimate_meal_nutrition",estimator)
+    await application.process_update(text_update(application,"два вареных яйца",6))
+    estimator.assert_not_called()
+    draft = database.get_draft(42,source_key="tg:42:6")
+    assert draft["state"] == "confirmed" and draft["payload"][0]["calories"] == 156
+    assert "156 ккал" in request.sent[-1]
+
+async def test_missing_portion_uses_average_and_warns_about_error(telegram_app,profile,database,monkeypatch):
+    application,request = telegram_app
+    estimate = {"is_food":True,"calories":410,"protein_g":23,"fat_g":15,"carbs_g":48,
+                "items":[{"name":"гречка","grams":200},{"name":"котлета","grams":90}],
+                "estimated":True,"meal_kind":"dense","assumptions":"Котлета принята за 90 г.",
+                "comment":"В приёме есть белок и сложные углеводы."}
+    estimator = AsyncMock(return_value=estimate)
     monkeypatch.setattr(meals,"estimate_meal_nutrition",estimator)
     await application.process_update(text_update(application,"макароны с котлетой",7))
-    estimator.assert_not_called()
+    estimator.assert_awaited_once_with("макароны с котлетой")
     draft = database.get_draft(42,source_key="tg:42:7")
-    assert draft["state"] == "clarifying"
-    assert "Уточни" in request.sent[-1]
+    assert draft["state"] == "confirmed"
+    assert "Оценка приблизительная" in request.sent[-1]
+    assert "Фактические значения могут отличаться" in request.sent[-1]
 
 async def test_name_step_keeps_timezone_and_survives_new_application(telegram_app,database):
     application,_ = telegram_app
@@ -127,7 +142,7 @@ async def test_pause_does_not_disable_diary(telegram_app,profile,database):
 async def test_ai_failure_does_not_create_fake_zero_meal(telegram_app,profile,database,monkeypatch):
     application,request = telegram_app
     monkeypatch.setattr(meals,"estimate_meal_nutrition",AsyncMock(return_value=None))
-    await application.process_update(text_update(application,"2 яйца"))
+    await application.process_update(text_update(application,"150 г экзотического блюда"))
     assert database.get_draft(42,source_key="tg:42:1") is None
     assert "не получилось рассчитать" in request.sent[-1]
 
