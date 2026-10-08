@@ -164,6 +164,14 @@ async def finish_onboarding(update, user_id):
         f"Анкета готова 🌿 Твой ориентировочный коридор: {low}–{high} ккал.\n\n"
         +goal_recommendation(completed)+"\n\n"+trial_text,reply_markup=main_menu_kb)
 
+    if await query(db.access_active,user_id,instant):
+        await update.message.reply_text(
+            "Теперь рассказывай мне о своих приёмах пищи 🌿\n\n"
+            "Напиши, что и примерно сколько ты поел(а). Например: «2 яйца и 150 г гречки». "
+            "Отправляй записи прямо сюда после каждого приёма пищи.\n\n"
+            "Давай начнём: что ты ел(а) в последний раз?",
+            reply_markup=main_menu_kb)
+
 
 async def handle_flow(update, context, profile):
     step = profile.get("flow_step")
