@@ -1,9 +1,6 @@
-# Установить зависимости:
-# pip install -r requirements.txt
-
-python-telegram-bot==20.8
-openai>=1.0.0
-httpx[socks]>=0.26.0
-python-dotenv>=1.0.0
-requests>=2.31.0
-pandas>=2.2.0
+python-telegram-bot[job-queue]==20.8
+openai==1.109.1
+httpx[socks]==0.26.0
+python-dotenv==1.2.4
+psycopg2-binary==2.9.13
+tzdata>=2025.1

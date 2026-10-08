@@ -1,17 +1,5 @@
-from dataclasses import dataclass, field
-from datetime import datetime
-from typing import Any
+"""SQL is authoritative. No growing in-memory diary or conversation buffer."""
+import asyncio
 
-# in-memory кэш над БД
-users_data: dict[int, dict[str, Any]] = {}
-
-@dataclass
-class MealEntry:
-    time: datetime
-    calories: int
-    raw: str
-    protein: float | None = None
-    fat: float | None = None
-    carbs: float | None = None
-    meal_kind: str = "plate"
-    auto: bool = False
+async def query(function, *args, **kwargs):
+    return await asyncio.to_thread(function, *args, **kwargs)

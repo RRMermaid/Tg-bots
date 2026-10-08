@@ -1,91 +1,35 @@
-from telegram.ext import ContextTypes
-from services.storage import users_data
-from domain.tz import now_local
-from db import analyze_user_day
-from services.openai_service import get_client
-import asyncio
-import logging
-from db import save_notification
+"""Notification content. Scheduling and durable deduplication live separately."""
+from nutrition import MORNING_VARIANTS, MEAL_REMINDER
+from services.analysis_service import daily_report
+from services.storage import query
+import db
 
-async def reminder_4h(context: ContextTypes.DEFAULT_TYPE):
-    user_id = context.job.data
-    now = now_local(users_data.get(user_id, {}).get("tzinfo"))
-    if now.hour >= 21:
-        return
-    try:
-        await context.bot.send_message(chat_id=user_id, text="Критично важно покушать уже сейчас!")
-    except Exception:
-        pass
+async def notification_text(kind, user, local_now):
+    if kind == "morning":
+        template = MORNING_VARIANTS[local_now.date().toordinal()%len(MORNING_VARIANTS)]
+        return template.format(name=user.get("name") or "друг")
+    if kind == "meal":
+        return MEAL_REMINDER
+    return await daily_report(user["id"],user,local_now.date())
 
-async def morning_weight_request_user(context: ContextTypes.DEFAULT_TYPE):
-    user_id = context.job.data
-    data = users_data.get(user_id, {}) or {}
-    name = data.get("name", "друг")
-    gender = data.get("gender", "Мужской")
-    client = get_client()
-    if not client:
-        message = f"Доброе утро, {name}! Пора взвеситься 🌤️"
-    else:
-        try:
-            resp = await asyncio.to_thread(
-                client.chat.completions.create,
-                model="gpt-4o-mini",
-                messages=[
-                    {"role": "system", "content": "Ты заботливый ассистент. Придумай уникальное приветствие."},
-                    {"role": "user", "content": f"Сгенерируй доброе утреннее приветствие для пользователя по имени {name}. Пол: {gender}. Приветствие должно быть тёплым, поддерживающим и всегда разным. И попроси пользователя взвеситься."}
-                ],
-                temperature=0.9,
-                max_tokens=80,
-            )
-            message = resp.choices[0].message.content.strip()
-        except Exception as e:
-            logging.getLogger(__name__).warning(f"Ошибка генерации утреннего приветствия: {e}")
-            message = f"Доброе утро, {name}! 🌞 Как твой вес сегодня?"
+async def send_notification(bot, user, kind, key, local_now):
+    claimed = await query(db.claim_notification,user["id"],kind,key)
+    if not claimed:
+        return False
+    success = False
     try:
-        await context.bot.send_message(chat_id=user_id, text=message)
-    except Exception:
-        pass
-
-async def evening_report_user(context: ContextTypes.DEFAULT_TYPE):
-    user_id = context.job.data
-    data = users_data.get(user_id) or {}
-    if not data:
-        return
-    date_today = now_local(data.get("tzinfo")).date()
-    meals = [m for m in data.get("meals", []) if m.get("time") and m["time"].date() == date_today]
-    if not meals:
-        return
-    calories_today = sum(m.get("calories", 0) for m in meals)
-    prot = sum((m.get("protein") or 0) for m in meals)
-    fat  = sum((m.get("fat") or 0) for m in meals)
-    carb = sum((m.get("carbs") or 0) for m in meals)
-    text = (
-        "Итог дня:\n"
-        f"• Калории: {calories_today} ккал\n"
-        f"• Приёмов пищи: {len(meals)}\n"
-        f"• КБЖУ: Б {round(prot,1)} г / Ж {round(fat,1)} г / У {round(carb,1)} г\n"
-        "Напоминание: полноценная тарелка (гарнир+белок+овощи) помогает держать режим. Вода и сон — тоже важны 💧😴"
-    )
-    try:
-        await context.bot.send_message(chat_id=user_id, text=text)
-        advice = analyze_user_day(user_id, date_today)
-        if advice:
-            await context.bot.send_message(chat_id=user_id, text=advice)
-    except Exception:
-        pass
-
-async def morning_weight_request_user(context: ContextTypes.DEFAULT_TYPE):
-    user_id = context.job.data
-    try:
-        await context.bot.send_message(chat_id=user_id, text="Доброе утро 🌤️ Пора взвеситься!")
-        save_notification(user_id, "morning")
-    except Exception:
-        pass
-
-async def evening_report_user(context: ContextTypes.DEFAULT_TYPE):
-    user_id = context.job.data
-    try:
-        await context.bot.send_message(chat_id=user_id, text="Добрый вечер 🌙 Вот твой дневной отчёт!")
-        save_notification(user_id, "evening")
-    except Exception:
-        pass
+        text = await notification_text(kind,user,local_now)
+        # Claim covers the whole report even if it needs several Telegram messages.
+        while len(text) > 3800:
+            split = text.rfind("\n",0,3800)
+            if split < 1:
+                split = 3800
+            await bot.send_message(chat_id=user["id"],text=text[:split])
+            text = text[split:].lstrip("\n")
+        if text:
+            await bot.send_message(chat_id=user["id"],text=text)
+        success = True
+        return True
+    finally:
+        # Ambiguous network failures are NOT retried automatically, to avoid duplicate sends.
+        await query(db.finish_notification,user["id"],kind,key,success)

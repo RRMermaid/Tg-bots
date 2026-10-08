@@ -8,7 +8,7 @@ from telegram.ext import (
     ContextTypes,
 )
 
-BOT_TOKEN = "8049457368:AAFe4ZZTTBsjkPCvx7yNYqzf8NGRIXjddXY"
+BOT_TOKEN = __import__("os").getenv("TRIP_BOT_TOKEN", "")
 ADMIN_ID = 579596451
 
 # Состояния разговора регистрации + помощь
@@ -161,3 +161,4 @@ def main():
 
 if __name__ == '__main__':
     main()
+

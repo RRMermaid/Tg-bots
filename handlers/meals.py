@@ -1,131 +1,174 @@
 import re
-from datetime import datetime, timedelta, timezone
-from telegram import Update
-from telegram.ext import ContextTypes
-from services.storage import users_data
+from datetime import datetime, timedelta
+
+import db
+from domain.meals import (basic_nutrition, manual_nutrition, meal_reminder_minutes,
+                          split_meals)
+from domain.tz import user_timezone
+from keyboards import edit_meal_keyboard, main_menu_kb
+from services.analysis_service import day_summary
 from services.openai_service import estimate_meal_nutrition
-from db import save_meal
-from states import BotState
-from domain.tz import get_user_offset
+from services.storage import query
 
-async def record_meal(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user = update.message.from_user
-    user_id = user.id
-    text = (update.message.text or "").strip()
-    data = users_data.setdefault(user_id, {})
 
-    if "goal" not in data:
-        await update.message.reply_text("Пожалуйста, начните с команды /start")
-        return BotState.RECORD_MEAL
+def water_amount(text):
+    match = re.fullmatch(r"(?:выпил[а]?\s+)?вод[аыу]\s+(\d+(?:[.,]\d+)?)\s*(мл|л|ml|l)",text,re.I)
+    if not match:
+        return None
+    ml = float(match[1].replace(",",".")) * (1000 if match[2].lower() in ("л","l") else 1)
+    if not 1 <= ml <= 10000:
+        raise ValueError("Уточни объём воды в мл или литрах.")
+    return round(ml)
 
-    now_sys = datetime.now(timezone.utc)
-    now_user = now_sys + get_user_offset(data)
 
-    # === Ручной ввод калорий ===
-    t_low = text.lower()
-    cal_match = re.search(
-        r"(\d+(?:[.,]\d+)?)\s*(?:к+кал+|кал+|калл+|калорий|ккалл+|k+cal+|kcals?|cal(?:ories)?)\b",
-        t_low
-    )
-    if cal_match:
-        val = cal_match.group(1)
-        cals = int(float(val.replace(",", ".")))
+def portion_question(raw):
+    return (f"Уточни, пожалуйста, порцию для записи «{raw}». Напиши граммы, количество "
+            "или понятную меру — например: «250 г», «2 штуки», «4 ложки» или «1 тарелка».")
 
-        data.setdefault("meals", []).append({"time": now_user, "calories": cals, "raw": text})
-        data["pending_meal"] = None
 
-        save_meal(
-            user_id=user_id,
-            time_obj=now_user,
-            calories=cals,
-            protein=None,
-            fat=None,
-            carbs=None,
-            raw=text,
-            meal_kind="snack",
-            portion=1.0,
-            oil_extra=0
-        )
+async def prepare_payload(parts):
+    payload = []
+    for part in parts:
+        raw = part["raw"]
+        water = water_amount(raw)
+        if water is not None:
+            payload.append({"time":part["time"].isoformat(),"raw":raw,"water_ml":water})
+            continue
+        if re.fullmatch(r"(?:выпил[а]?\s+)?вод[аыу]",raw,re.I):
+            raise ValueError("Напиши объём воды: «вода 250 мл».")
+        nutrition = manual_nutrition(raw) or basic_nutrition(raw)
+        if nutrition is None:
+            nutrition = await estimate_meal_nutrition(raw)
+        if nutrition is None:
+            raise ValueError("Сейчас не получилось рассчитать запись. Уточни состав и порцию или укажи калории.")
+        if not nutrition["is_food"]:
+            raise ValueError("Напиши, что удалось поесть и примерно сколько.")
+        if nutrition.get("needs_clarification"):
+            return None,{**part,"question":nutrition.get("clarification_question")}
+        nutrition["reminder_minutes"] = meal_reminder_minutes(raw,nutrition.get("meal_kind") or "dense")
+        payload.append({**nutrition,"time":part["time"].isoformat(),"raw":raw})
+    return payload,None
 
-        await update.message.reply_text(f"Записано: {cals} ккал (ручной ввод).")
-        return BotState.RECORD_MEAL
 
-    # === Автооценка через OpenAI ===
-    await update.message.reply_text("Считаю калории…")
-    nutri = {}
-    try:
-        nutri = await estimate_meal_nutrition(t_low)
-    except Exception:
-        pass
+def meal_lines(meal):
+    if meal.get("water_ml"):
+        return [f"💧 Вода записана: {meal['water_ml']} мл."]
+    macros = []
+    for key,label in (("protein_g","Б"),("fat_g","Ж"),("carbs_g","У")):
+        macros.append(f"{label} {meal[key]:g} г" if meal.get(key) is not None else f"{label} —")
+    lines = [f"🍽 {meal['raw']}",f"Примерно {meal['calories']} ккал · "+" · ".join(macros)]
+    if meal.get("comment"):
+        lines.append(meal["comment"])
+    if meal.get("estimated"):
+        assumption = str(meal.get("assumptions") or "").strip().rstrip(".")
+        assumption = assumption or "взяты средняя порция и типичный рецепт"
+        lines.append(f"Оценка приблизительная: {assumption[0].lower()+assumption[1:]}. Фактические значения могут отличаться.")
+    return lines
 
-    if not nutri or "calories" not in nutri:
-        await update.message.reply_text(
-            "Не удалось оценить блюдо автоматически 😕 Пришлите калории числом, например: 350 ккал."
-        )
-        return BotState.RECORD_MEAL
 
-    cals = int(nutri["calories"])
-    p = nutri.get("protein_g")
-    f = nutri.get("fat_g")
-    ch = nutri.get("carbs_g")
-    meal_kind = nutri.get("meal_kind") or "plate"
+def minutes_of(clock):
+    hour,minute = map(int,clock.split(":"))
+    return hour*60+minute
 
-    meal_entry = {
-        "time": now_user,
-        "calories": cals,
-        "protein": p,
-        "fat": f,
-        "carbs": ch,
-        "raw": text,
-        "meal_kind": meal_kind,
-        "auto": True,
-    }
-    data.setdefault("meals", []).append(meal_entry)
 
-    save_meal(
-        user_id=user_id,
-        time_obj=now_user,
-        calories=cals,
-        protein=p,
-        fat=f,
-        carbs=ch,
-        raw=text,
-        meal_kind=meal_kind,
-        portion=1.0,
-        oil_extra=0
-    )
+def evening_is_close(profile, next_time):
+    local = next_time.astimezone(user_timezone(profile))
+    gap = minutes_of(profile["evening_time"]) - (local.hour*60+local.minute)
+    return 0 <= gap < 120
 
-    # === Определяем задержку для напоминания ===
-    if meal_kind == "soup" or ("яич" in t_low) or ("омлет" in t_low) or ("яйц" in t_low):
-        delay = timedelta(hours=2)
-        reminder_text = "Важно покушать через 2 часа после лёгкого блюда (суп/яйца)!"
+
+async def saved_message(profile, payload, received_at):
+    food = [meal for meal in payload if not meal.get("water_ml")]
+    lines = ["Запись сохранена 🌿"]
+    for meal in payload:
+        lines.extend(meal_lines(meal))
+    if food:
+        latest = max(food,key=lambda meal:meal["time"])
+        stamp = datetime.fromisoformat(latest["time"])
+        summary = await query(day_summary,profile["id"],stamp.astimezone(user_timezone(profile)).date(),profile)
+        upper = profile.get("calorie_upper")
+        if upper is not None:
+            remaining = round(upper-summary["totals"]["calories"])
+            if remaining >= 0:
+                lines.append(f"До верхней границы коридора осталось примерно {remaining} ккал.")
+            else:
+                lines.append(f"Сейчас примерно на {abs(remaining)} ккал выше верхней границы. "
+                             "Следующий приём не нужно пропускать — ориентируйся на голод и выбери подходящую порцию.")
+        next_time = stamp+timedelta(minutes=latest.get("reminder_minutes",180))
+        received_local = received_at.astimezone(user_timezone(profile))
+        next_local = next_time.astimezone(user_timezone(profile))
+        if next_time > received_at and next_local.date() == received_local.date():
+            lines.append("Ориентир следующего приёма — около "+next_local.strftime("%H:%M")+".")
+            if evening_is_close(profile,next_time):
+                lines.append("До вечернего отчёта останется меньше двух часов, поэтому отдельного напоминания не будет.")
+        else:
+            lines.append("Это запись за прошедшее время, поэтому новое напоминание по ней не ставлю.")
+    return "\n".join(lines)
+
+
+async def finish_save(update, profile, draft, payload, editing=False):
+    if editing:
+        saved = await query(db.replace_draft,profile["id"],draft["id"],payload)
     else:
-        delay = timedelta(hours=3)
-        reminder_text = "Через 3 часа после этого приёма пищи важно позаботиться о себе и покушать!"
+        saved = await query(db.confirm_draft,profile["id"],draft["id"])
+    if not saved:
+        await update.message.reply_text("Эта запись уже обработана; повторно её не добавляю.")
+        return
+    await update.message.reply_text(await saved_message(profile,payload,update.message.date),
+                                    reply_markup=edit_meal_keyboard(draft["id"]))
 
-    async def personalized_reminder(ctx: ContextTypes.DEFAULT_TYPE):
-        try:
-            await ctx.bot.send_message(chat_id=user_id, text=reminder_text)
-        except Exception:
-            pass
 
-    # === Удаляем старые напоминания, чтобы не спамить ===
-    for job in context.application.job_queue.get_jobs_by_name(f"next_meal_{user_id}"):
-        job.schedule_removal()
+async def record_meal(update, context, profile):
+    if not profile["profile_complete"] or not profile.get("timezone"):
+        await update.message.reply_text("Сначала заполним анкету: /start.")
+        return
+    uid = profile["id"]
+    text = (update.message.text or "").strip()
 
-    # === Ставим новое напоминание ===
-    context.application.job_queue.run_once(
-        personalized_reminder,
-        when=delay,
-        name=f"next_meal_{user_id}",
-        data=user_id,
-    )
+    # Older versions could leave the user stuck in a portion-clarification state.
+    # New entries use an average portion instead, so retire that stale draft.
+    clarification = await query(db.get_active_draft,uid,"clarifying")
+    if clarification:
+        await query(db.update_draft,uid,clarification["id"],clarification["payload"],"cancelled")
 
-    macros = (
-        f"\nБ: {round(p,1)} г • Ж: {round(f,1)} г • У: {round(ch,1)} г"
-        if all(x is not None for x in (p, f, ch)) else ""
-    )
-    gap = 2 if delay == timedelta(hours=2) else 3
-    await update.message.reply_text(f"Записано: ~{cals} ккал.{macros}\nСледующий приём через ~{gap} ч.")
+    editing = await query(db.get_active_draft,uid,"editing")
+    source = f"tg:{update.effective_chat.id}:{update.message.message_id}"
+    existing = await query(db.get_draft,uid,source_key=source)
+    if existing and existing["state"] == "confirmed":
+        await update.message.reply_text("Эта запись уже сохранена.",reply_markup=edit_meal_keyboard(existing["id"]))
+        return
+    try:
+        parts = split_meals(text,update.message.date,profile)
+        payload,missing = await prepare_payload(parts)
+        if missing:
+            question = missing.get("question") or portion_question(missing["raw"])
+            if editing or len(parts) > 1:
+                await update.message.reply_text(question+" Пришли всю исправленную запись целиком.")
+                return
+            draft = await query(db.save_clarification,uid,source,[
+                {"time":missing["time"].isoformat(),"raw":missing["raw"]}])
+            await update.message.reply_text(question)
+            return
+        if editing:
+            await finish_save(update,profile,editing,payload,editing=True)
+        else:
+            draft = existing or await query(db.save_draft,uid,source,payload)
+            await finish_save(update,profile,draft,payload)
+    except ValueError as exc:
+        await update.message.reply_text(str(exc))
 
-    return BotState.RECORD_MEAL
+
+async def edit_meal(update, context):
+    callback = update.callback_query
+    await callback.answer()
+    if update.effective_chat is None or update.effective_chat.type != "private":
+        return
+    match = re.fullmatch(r"meal:edit:(\d+)",callback.data or "")
+    if not match:
+        return
+    if await query(db.start_edit_draft,update.effective_user.id,int(match[1])):
+        await callback.message.reply_text(
+            "Пришли исправленную запись целиком: название, порцию и при необходимости время.",
+            reply_markup=main_menu_kb)
+    else:
+        await callback.message.reply_text("Эту запись сейчас нельзя изменить.")

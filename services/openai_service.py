@@ -1,63 +1,50 @@
+"""One lazy async client, bounded input/output, no transcript or remote memory."""
 import json
 import logging
-import asyncio
-from openai import OpenAI
-from config import OPENAI_API_KEY, OPENAI_MODEL_ID, build_http_client_for_openai
+import httpx
+from openai import AsyncOpenAI
+import config
+from domain.meals import validate_nutrition
+from prompts import MEAL_SYSTEM_PROMPT
 
 logger = logging.getLogger(__name__)
+_client = None
 
-OPENAI_SYSTEM_PROMPT = """
-Ты — добрый, заботливый нутрициолог. 
-Твоя задача — определить калорийность и КБЖУ блюда. 
-Ответь строго в JSON формате, например:
-{
-  "calories": 350,
-  "protein_g": 20,
-  "fat_g": 10,
-  "carbs_g": 45,
-  "meal_kind": "plate"
-}
-"""
+def get_client():
+    global _client
+    if _client is None and config.OPENAI_API_KEY:
+        transport = httpx.AsyncClient(
+            proxy=config.OPENAI_PROXY_URL or None, trust_env=False,
+            timeout=httpx.Timeout(30.0, connect=10.0))
+        _client = AsyncOpenAI(api_key=config.OPENAI_API_KEY,
+                             base_url=config.OPENAI_BASE_URL or None,
+                             http_client=transport, max_retries=1)
+    return _client
 
-_client: OpenAI | None = None
-
-def get_client() -> OpenAI | None:
+async def close_client():
     global _client
     if _client is not None:
-        return _client
-    if not OPENAI_API_KEY:
-        return None  # тихо, без лишних сообщений
-    try:
-        http_client = build_http_client_for_openai()
-        _client = OpenAI(api_key=OPENAI_API_KEY, http_client=http_client)
-        return _client
-    except Exception as e:
-        logger.error(f"Ошибка инициализации OpenAI: {e}")
-        return None
+        await _client.close()
+        _client = None
 
-async def estimate_meal_nutrition(text: str) -> dict:
+async def estimate_meal_nutrition(text):
+    if len(text) > config.MAX_MEAL_CHARS:
+        raise ValueError("Meal text too long")
     client = get_client()
-    if not client:
-        return {}
+    if client is None:
+        return None
     try:
-        resp = await asyncio.to_thread(
-            client.chat.completions.create,
-            model=OPENAI_MODEL_ID,
-            messages=[
-                {"role": "system", "content": OPENAI_SYSTEM_PROMPT},
-                {"role": "user", "content": text}
-            ],
-            temperature=0.2,
-            max_tokens=200,
-            response_format={"type": "json_object"}  # 🔥 гарантируем JSON
-        )
-        content = resp.choices[0].message.content
-        return json.loads(content)
-    except Exception as e:
-        logger.warning(f"Ошибка при парсинге ответа OpenAI: {e}")
-        # Логируем полный ответ для отладки
-        try:
-            logger.error(f"Полный ответ модели: {resp}")
-        except Exception:
-            pass
-        return {}
+        response = await client.chat.completions.create(
+            model=config.OPENAI_MODEL_ID,
+            messages=[{"role":"system","content":MEAL_SYSTEM_PROMPT},
+                      {"role":"user","content":text}],
+            temperature=0.2, max_tokens=900,
+            response_format={"type":"json_object"})
+        choice = response.choices[0]
+        if choice.finish_reason != "stop":
+            raise ValueError("Incomplete model response")
+        return validate_nutrition(json.loads(choice.message.content))
+    except Exception as exc:
+        # Do not log user's diary, credentials or full model response.
+        logger.warning("Nutrition estimation failed: %s", type(exc).__name__)
+        return None
